@@ -3,16 +3,17 @@ import torch.nn as nn
 
 
 """
-Purpose:
-    Applies rotary positional encoding to input vectors.
+Root Mean Square Normalization (RMSNorm)
 
-Input:
-    x: [batch_size, num_heads, sequence_length, head_dim]
-    cos: [sequence_length, head_dim // 2]
-    sin: [sequence_length, head_dim // 2]
+Normalizes input vectors using their root mean square
+and applies a learnable scaling parameter.
 
-Output:
-    rotated_x: [batch_size, num_heads, sequence_length, head_dim]
+RMSNorm:
+    Input:
+        x: [batch_size, sequence_length, ndim]
+
+    Output:
+        normalized_x: [batch_size, sequence_length, ndim]
 """
 
 
