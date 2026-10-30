@@ -1,33 +1,6 @@
 import torch
 import torch.nn as nn
 
-
-"""
-Rotary Positional Embeddings (RoPE)
-
-Generates rotary frequency embeddings and applies them
-to input vectors to encode positional information.
-
-RotaryEmbedding:
-    Input:
-        x: [batch_size, num_heads, sequence_length, head_dim]
-        seq_len: Optional sequence length
-
-    Output:
-        cos: [sequence_length, head_dim // 2]
-        sin: [sequence_length, head_dim // 2]
-
-apply_rope:
-    Input:
-        x: [batch_size, num_heads, sequence_length, head_dim]
-        cos: [sequence_length, head_dim // 2]
-        sin: [sequence_length, head_dim // 2]
-
-    Output:
-        rotated_x: [batch_size, num_heads, sequence_length, head_dim]
-"""
-
-
 class RotaryEmbedding(nn.Module):
     def __init__(self, dim, max_seq_len):
         super().__init__()
