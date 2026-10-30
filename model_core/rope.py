@@ -3,16 +3,28 @@ import torch.nn as nn
 
 
 """
-Purpose:
-    Generates rotary positional encoding frequency tensors.
+Rotary Positional Embeddings (RoPE)
 
-Input:
-    x: [batch_size, num_heads, sequence_length, head_dim]
-    seq_len: Optional sequence length.
+Generates rotary frequency embeddings and applies them
+to input vectors to encode positional information.
 
-Output:
-    cos: [sequence_length, head_dim // 2]
-    sin: [sequence_length, head_dim // 2]
+RotaryEmbedding:
+    Input:
+        x: [batch_size, num_heads, sequence_length, head_dim]
+        seq_len: Optional sequence length
+
+    Output:
+        cos: [sequence_length, head_dim // 2]
+        sin: [sequence_length, head_dim // 2]
+
+apply_rope:
+    Input:
+        x: [batch_size, num_heads, sequence_length, head_dim]
+        cos: [sequence_length, head_dim // 2]
+        sin: [sequence_length, head_dim // 2]
+
+    Output:
+        rotated_x: [batch_size, num_heads, sequence_length, head_dim]
 """
 
 
