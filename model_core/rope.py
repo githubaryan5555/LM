@@ -1,6 +1,21 @@
 import torch
 import torch.nn as nn
 
+
+"""
+Purpose:
+    Generates rotary positional encoding frequency tensors.
+
+Input:
+    x: [batch_size, num_heads, sequence_length, head_dim]
+    seq_len: Optional sequence length.
+
+Output:
+    cos: [sequence_length, head_dim // 2]
+    sin: [sequence_length, head_dim // 2]
+"""
+
+
 class RotaryEmbedding(nn.Module):
     def __init__(self, dim, max_seq_len):
         super().__init__()
