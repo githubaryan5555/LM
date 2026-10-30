@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class SwiGLU(nn.Module):
-    def __init__(self, in_features, hidden_features, out_features, bias=True):
+    def __init__(self, in_features, hidden_features, out_features, bias):
         super().__init__()
         self.gate_proj = nn.Linear(in_features, hidden_features, bias=bias)
         self.up_proj = nn.Linear(in_features, hidden_features, bias=bias)
