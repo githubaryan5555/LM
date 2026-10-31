@@ -9,7 +9,7 @@ class ModelConfig:
     # Core architecture
     vocab_size: int = 8192
     block_size: int = 256
-    n_layer: int = None
+    n_layer: int = 4
     n_embd: int = 512
     n_head: int = 8
 
@@ -19,10 +19,10 @@ class ModelConfig:
     rope_dim: int = 32
 
     # Mixture of experts
-    n_experts: int = None
-    n_experts_per_token: int = None
-    expert_intermediate_size: int = None
-    shared_expert_intermediate_size: int = None
+    n_experts: int = 8
+    n_experts_per_token: int = 2
+    expert_intermediate_size: int = 256
+    shared_expert_intermediate_size: int = 256
     use_shared_expert: bool = True
 
     # Multi-token prediction
@@ -60,14 +60,14 @@ class ModelConfig:
     top_k: int = 64
 
    
-   # ============OTHERS========
+    # ============OTHERS========
 
-   # Model name
-   model_family_name: str = "5555LM"
-   model_version: str = "Test1"
+    # Model name
+    model_family_name: str = "5555LM"
+    model_version: str = "Test1"
 
-   # Paths
-   model_save_folder: Path = Path("ckpt_out")
-   tokenizer_path: Path = Path("tokenizer/tokenizer.json")
-   train_path: Path = Path("datasets/train.bin") 
-   val_path: Path = Path("datasets/val.bin")
+    # Paths
+    model_save_folder: Path = Path("ckpt_out")
+    tokenizer_path: Path = Path("tokenizer/tokenizer.json")
+    train_path: Path = Path("datasets/train.bin") 
+    val_path: Path = Path("datasets/val.bin")
