@@ -7,16 +7,16 @@ class ModelConfig:
     # ==================== MODEL VARIABLES ====================
 
     # Core architecture
-    vocab_size: int = None
-    block_size: int = None
+    vocab_size: int = 8192
+    block_size: int = 256
     n_layer: int = None
-    n_embd: int = None
-    n_head: int = None
+    n_embd: int = 512
+    n_head: int = 8
 
     # Multi-head latent attention
-    kv_lora_rank: int = None
-    q_lora_rank: int = None
-    rope_dim: int = None
+    kv_lora_rank: int = 64
+    q_lora_rank: int = 128
+    rope_dim: int = 32
 
     # Mixture of experts
     n_experts: int = None
