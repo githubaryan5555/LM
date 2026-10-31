@@ -75,3 +75,85 @@ class Model(nn.Module):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
 
+
+
+    def forward(self, idx, targets=None):
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size
+
+        # Token and position embeddings
+        pos = torch.arange(0, t, dtype=torch.long, device=device)
+        tok_emb = self.wte(idx)
+        pos_emb = self.wpe(pos)
+        x = self.drop(tok_emb + pos_emb)
+
+        # Transformer blocks
+        for block in self.h:
+            x = block(x)
+
+        # Final norm
+        x = self.ln_f(x)
+
+        # Main language modeling head
+        main_logits = self.lm_head(x)
+        main_loss = None
+
+        if targets is not None:
+            main_loss = F.cross_entropy(
+                main_logits.view(-1, main_logits.size(-1)),
+                targets.view(-1),
+                ignore_index=-1
+            )
+
+        # Multi-Token Prediction
+        mtp_loss = None
+        if self.mtp_heads is not None and targets is not None:
+            mtp_losses = []
+            current_hidden = x
+
+            for depth, mtp_head in enumerate(self.mtp_heads, 1):
+                if t > depth:
+                    future_indices = idx[:, depth:]
+                    future_embeds = self.wte(future_indices)
+
+                    if future_embeds.size(1) < current_hidden.size(1):
+                        pad_size = current_hidden.size(1) - future_embeds.size(1)
+                        padding = torch.zeros(
+                            b, pad_size, self.config.n_embd,
+                            device=device, dtype=future_embeds.dtype
+                        )
+                        future_embeds = torch.cat([future_embeds, padding], dim=1)
+                    elif future_embeds.size(1) > current_hidden.size(1):
+                        future_embeds = future_embeds[:, :current_hidden.size(1)]
+
+                    current_hidden = mtp_head(current_hidden, future_embeds)
+                    mtp_logits = self.lm_head(current_hidden)
+
+                    if t > depth + 1:
+                        shift_logits = mtp_logits[..., :-(depth+1), :].contiguous()
+                        shift_labels = targets[..., depth+1:].contiguous()
+
+                        if shift_labels.numel() > 0:
+                            mtp_loss_single = F.cross_entropy(
+                                shift_logits.view(-1, shift_logits.size(-1)),
+                                shift_labels.view(-1),
+                                ignore_index=-1
+                            )
+                            mtp_losses.append(mtp_loss_single)
+
+            if mtp_losses:
+                mtp_loss = torch.stack(mtp_losses).mean()
+
+        # Combine losses
+        if targets is not None:
+            if mtp_loss is not None:
+                total_loss = main_loss + self.config.mtp_loss_weight * mtp_loss
+                return main_logits, total_loss, main_loss, mtp_loss
+            else:
+                return main_logits, main_loss, main_loss, None
+        else:
+            return main_logits[:, [-1], :], None, None, None
+
+
+
