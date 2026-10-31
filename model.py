@@ -36,7 +36,7 @@ class Model(nn.Module):
         self.drop = nn.Dropout(config.dropout)
 
         # Transformer blocks
-        self.h = nn.ModuleList([DeepSeekBlock(config) for _ in range(config.n_layer)])
+        self.h = nn.ModuleList([ModelBlock(config) for _ in range(config.n_layer)])
 
         # Final layer norm
         self.ln_f = RMSNorm(config.n_embd)
