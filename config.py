@@ -23,10 +23,10 @@ class ModelConfig:
     n_experts_per_token: int = None
     expert_intermediate_size: int = None
     shared_expert_intermediate_size: int = None
-    use_shared_expert: bool = None
+    use_shared_expert: bool = True
 
     # Multi-token prediction
-    mtp_num_heads: int = None
+    mtp_num_heads: int = 4
 
     # ==================== TRAIN VARIABLES ====================
 
