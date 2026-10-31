@@ -31,25 +31,25 @@ class ModelConfig:
     # ==================== TRAIN VARIABLES ====================
 
     # Training schedule
-    learning_rate: float = None
-    max_iters: int = None
-    warmup_steps: int = None
-    min_lr: float = None
-    eval_iters: int = None
-    batch_size: int = None
-    gradient_accumulation_steps: int = None
-    train_samples: int = None
-    train_sample_max_tokens: int = None
+    learning_rate: float = 3e-4
+    max_iters: int = 1024
+    warmup_steps: int = 128
+    min_lr: float = 3e-5
+    eval_iters: int = 256
+    batch_size: int = 128
+    gradient_accumulation_steps: int = 16
+    train_samples: int = 8
+    train_sample_max_tokens: int = 512
     # Optimizer
-    betas: tuple = None
-    weight_decay: float = None
-    eps: float = None
+    betas: tuple = (0.9, 0.95)
+    weight_decay: float = 0.1
+    eps: float = 1e-8
 
     # Re regularization and auxiliary losses
-    dropout: float = None
-    bias: bool = None
-    aux_loss_weight: float = None
-    mtp_loss_weight: float = None
+    dropout: float = 0.0
+    bias: bool = False
+    aux_loss_weight: float = 0.0005
+    mtp_loss_weight: float = 0.25
 
     # ==================== GENERATION VARIABLES ====================
 
