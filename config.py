@@ -37,8 +37,8 @@ class ModelConfig:
     eval_iters: int = None
     batch_size: int = None
     gradient_accumulation_steps: int = None
-    num_samples: int = None
-    sample_max_tokens: int = None
+    train_samples: int = None
+    train_sample_max_tokens: int = None
     # Optimizer
     betas: tuple = None
     weight_decay: float = None
@@ -53,18 +53,20 @@ class ModelConfig:
     # ==================== GENERATION VARIABLES ====================
 
     # Text generation settings
-    max_tokens: int = None
-    temperature: float = None
-    top_k: int = None
+    max_tokens: int = 1024
+    samples: int = 16
+    temperature: float = 0.8
+    top_k: int = 64
 
    
    # ============OTHERS========
 
    # Model name
-   model_name: str = None
+   model_family_name: str = 5555LM
+   model_version: str = Test1
 
    # Paths
-   model_save_folder: str = 
-   tokenizer_path: str =
-   train_bin_path: str =
-   val_bin_path: str =
+   model_save_folder: str = ckpt_out
+   tokenizer_path: str = tokenizer/tokenizer.json
+   train_path: str = datasets/train.bin
+   val_path: str = datasets/val.bin
