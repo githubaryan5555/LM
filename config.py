@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 
 @dataclass
 class ModelConfig:
@@ -62,11 +63,11 @@ class ModelConfig:
    # ============OTHERS========
 
    # Model name
-   model_family_name: str = 5555LM
-   model_version: str = Test1
+   model_family_name: str = "5555LM"
+   model_version: str = "Test1"
 
    # Paths
-   model_save_folder: str = ckpt_out
-   tokenizer_path: str = tokenizer/tokenizer.json
-   train_path: str = datasets/train.bin
-   val_path: str = datasets/val.bin
+   model_save_folder: Path = Path("ckpt_out")
+   tokenizer_path: Path = Path("tokenizer/tokenizer.json")
+   train_path: Path = Path("datasets/train.bin") 
+   val_path: Path = Path("datasets/val.bin")
