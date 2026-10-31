@@ -52,10 +52,18 @@ class ModelConfig:
     # ==================== GENERATION VARIABLES ====================
 
     # Text generation settings
-    model_path: str = None
     max_tokens: int = None
     temperature: float = None
     top_k: int = None
- 
 
-   #!!
+   
+   # ============OTHERS========
+
+   # Model name
+   model_name: str = None
+
+   # Paths
+   model_save_folder: str = 
+   tokenizer_path: str =
+   train_bin_path: str =
+   val_bin_path: str =
