@@ -37,13 +37,14 @@ class ModelConfig:
     eval_iters: int = None
     batch_size: int = None
     gradient_accumulation_steps: int = None
-
+    num_samples: int = None
+    sample_max_tokens: int = None
     # Optimizer
     betas: tuple = None
     weight_decay: float = None
     eps: float = None
 
-    # Regularization and auxiliary losses
+    # Re regularization and auxiliary losses
     dropout: float = None
     bias: bool = None
     aux_loss_weight: float = None
