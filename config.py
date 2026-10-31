@@ -53,7 +53,7 @@ class ModelConfig:
     # ==================== GENERATION VARIABLES ====================
 
     # Text generation settings
-    max_tokens: int = 1024
+    max_generated_tokens: int = 1024
     samples: int = 16
     temperature: float = 0.8
     top_k: int = 64
