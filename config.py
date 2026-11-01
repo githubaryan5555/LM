@@ -36,6 +36,7 @@ class ModelConfig:
     max_iters: int = 1024
     warmup_steps: int = 128
     min_lr: float = 3e-5
+    eval_interval: int = 128
     eval_iters: int = 256
     batch_size: int = 128
     gradient_accumulation_steps: int = 16
