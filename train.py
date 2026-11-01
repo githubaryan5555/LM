@@ -7,10 +7,11 @@ from model import Model
 from config import ModelConfig
 
 
-config.model_save_folder.mkdir(parents=True, exist_ok=True)
+
 
 def train_model():
     config = ModelConfig()
+    config.model_save_folder.mkdir(parents=True, exist_ok=True)
     device = config.device if config.device == "cuda" and torch.cuda.is_available() else "cpu"
     device_type = "cuda" if device == "cuda" else "cpu"
     dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}[config.dtype]
