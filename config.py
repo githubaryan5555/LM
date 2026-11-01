@@ -19,7 +19,7 @@ class ModelConfig:
     rope_dim: int = 32
 
     # Mixture of experts
-    n_experts: int = 8
+    n_experts: int = 4
     n_experts_per_token: int = 2
     expert_intermediate_size: int = 256
     shared_expert_intermediate_size: int = 256
@@ -31,6 +31,7 @@ class ModelConfig:
     # ==================== TRAIN VARIABLES ====================
 
     # Training schedule
+    compile: bool = True
     learning_rate: float = 3e-4
     max_iters: int = 1024
     warmup_steps: int = 128
