@@ -94,7 +94,8 @@ def train_model():
             scaler.scale(loss).backward()
             total_loss += loss.detach().item()
             main_loss += main.detach().item()
-            mtp_loss += mtp.detach().item()
+            if mtp is not None:
+                mtp_loss += mtp.detach().item()
 
         scaler.step(optimizer)
         scaler.update()
