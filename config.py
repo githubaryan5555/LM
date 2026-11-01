@@ -19,8 +19,8 @@ class ModelConfig:
     rope_dim: int = 32
 
     # Mixture of experts
-    n_experts: int = 8
-    n_experts_per_token: int = 2
+    n_experts: int = 16
+    n_experts_per_token: int = 4
     expert_intermediate_size: int = 512
     shared_expert_intermediate_size: int = 512
     use_shared_expert: bool = True
