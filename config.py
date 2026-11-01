@@ -32,10 +32,10 @@ class ModelConfig:
 
     # Training schedule
     compile: bool = True
-    learning_rate: float = 3e-4
+    learning_rate: float = 8e-4
     max_iters: int = 1024
-    warmup_steps: int = 128
-    min_lr: float = 3e-5
+    warmup_steps: int = 64
+    min_lr: float = 2e-4
     eval_interval: int = 128
     eval_iters: int = 256
     batch_size: int = 64
@@ -45,12 +45,12 @@ class ModelConfig:
     # Optimizer
     betas: tuple = (0.9, 0.95)
     weight_decay: float = 0.1
-    eps: float = 1e-8
+    eps: float = 1e-9
 
     # Re regularization and auxiliary losses
     dropout: float = 0.0
     bias: bool = False
-    aux_loss_weight: float = 0.0005
+    aux_loss_weight: float = 0.001
     mtp_loss_weight: float = 0.25
     device: str = "cuda"
     dtype: str = "float16"
