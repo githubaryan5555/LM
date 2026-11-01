@@ -26,7 +26,7 @@ class ModelConfig:
     use_shared_expert: bool = True
 
     # Multi-token prediction
-    mtp_num_heads: int = 4
+    mtp_num_heads: int = 2
 
     # ==================== TRAIN VARIABLES ====================
 
@@ -38,8 +38,8 @@ class ModelConfig:
     min_lr: float = 3e-5
     eval_interval: int = 128
     eval_iters: int = 256
-    batch_size: int = 128
-    gradient_accumulation_steps: int = 16
+    batch_size: int = 8
+    gradient_accumulation_steps: int = 256
     train_samples: int = 8
     train_sample_max_tokens: int = 512
     # Optimizer
