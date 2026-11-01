@@ -21,12 +21,12 @@ class ModelConfig:
     # Mixture of experts
     n_experts: int = 2
     n_experts_per_token: int = 2
-    expert_intermediate_size: int = 256
-    shared_expert_intermediate_size: int = 256
+    expert_intermediate_size: int = 512
+    shared_expert_intermediate_size: int = 512
     use_shared_expert: bool = True
 
     # Multi-token prediction
-    mtp_num_heads: int = 2
+    mtp_num_heads: int = 0
 
     # ==================== TRAIN VARIABLES ====================
 
