@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from tqdm.auto import tqdm
 from model import Model
-from model_core.config import ModelConfig
+from config import ModelConfig
 
 
 config.model_save_folder.mkdir(parents=True, exist_ok=True)
