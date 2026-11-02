@@ -1,31 +1,13 @@
-"""
-LM training script.
-
-Features:
-- Uses ModelConfig from config.py as the only configuration source.
-- Reproducible Python, NumPy, PyTorch, CUDA, and data sampling.
-- Detailed training, evaluation, timing, throughput, and VRAM logging.
-- Per-layer/module parameter and memory diagnostics.
-- Random train.bin and val.bin text samples after evaluation.
-- Main loss and MTP loss reporting.
-- AMP with GradScaler for CUDA FP16.
-- Best validation checkpoint saving.
-
-Expected model interface:
-    logits, total_loss, main_loss, mtp_loss = model(X, Y)
-
-Dataset format:
-    Pre-tokenized uint16 .bin files.
-"""
+# train.py
 
 import math
 import random
 import time
-import logging
 from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn as nn
 from tqdm.auto import tqdm
 
 from model import Model
@@ -33,227 +15,62 @@ from config import ModelConfig
 
 
 # ============================================================
-# LOGGING
+# Logging utilities
 # ============================================================
 
-LOGGER = logging.getLogger("LM.train")
+GIB = 1024 ** 3
 
 
-def setup_logging():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)-8s | %(message)s",
-        datefmt="%H:%M:%S",
-        force=True,
-    )
+def format_time(seconds):
+    seconds = max(0, int(seconds))
+
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+
+    if hours:
+        return f"{hours}h {minutes:02d}m {seconds:02d}s"
+
+    if minutes:
+        return f"{minutes}m {seconds:02d}s"
+
+    return f"{seconds}s"
 
 
-def section(title):
-    LOGGER.info("")
-    LOGGER.info("=" * 100)
-    LOGGER.info(" %s", title)
-    LOGGER.info("=" * 100)
-
-
-def fmt_time(seconds):
-    seconds = max(0.0, float(seconds))
-
-    if seconds < 60:
-        return f"{seconds:.2f}s"
-
-    minutes, seconds = divmod(seconds, 60)
-
-    if minutes < 60:
-        return f"{int(minutes)}m {seconds:.1f}s"
-
-    hours, minutes = divmod(minutes, 60)
-    return f"{int(hours)}h {int(minutes)}m {seconds:.1f}s"
-
-
-def fmt_bytes(num_bytes):
-    num_bytes = float(num_bytes)
-
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if num_bytes < 1024:
-            return f"{num_bytes:.2f} {unit}"
-
-        num_bytes /= 1024
-
-    return f"{num_bytes:.2f} PB"
-
-
-# ============================================================
-# CUDA / VRAM
-# ============================================================
-
-def synchronize(device):
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
-
-
-def get_vram(device):
-    """
-    Returns the current CUDA memory statistics.
-
-    allocated:
-        Memory occupied by tensors.
-
-    reserved:
-        Memory held by PyTorch's caching allocator.
-
-    peak:
-        Peak allocated memory since the last reset.
-
-    free:
-        Current device memory reported by CUDA.
-    """
-
-    if device.type != "cuda":
+def get_vram():
+    if not torch.cuda.is_available():
         return None
 
-    allocated = torch.cuda.memory_allocated(device)
-    reserved = torch.cuda.memory_reserved(device)
-    peak = torch.cuda.max_memory_allocated(device)
-
-    free, total = torch.cuda.mem_get_info(device)
+    free, total = torch.cuda.mem_get_info()
 
     return {
-        "allocated": allocated,
-        "reserved": reserved,
-        "peak": peak,
+        "allocated": torch.cuda.memory_allocated(),
+        "reserved": torch.cuda.memory_reserved(),
+        "peak_allocated": torch.cuda.max_memory_allocated(),
+        "peak_reserved": torch.cuda.max_memory_reserved(),
         "free": free,
         "total": total,
     }
 
 
-def log_vram(label, device):
-    stats = get_vram(device)
+def print_vram(label):
+    memory = get_vram()
 
-    if stats is None:
-        LOGGER.info("%s | VRAM: unavailable (CPU)", label)
+    if memory is None:
+        print(f"[VRAM] {label}: CUDA unavailable")
         return
 
-    LOGGER.info(
-        "%s | "
-        "Allocated=%s | "
-        "Reserved=%s | "
-        "Peak allocated=%s | "
-        "Free=%s / %s",
-        label,
-        fmt_bytes(stats["allocated"]),
-        fmt_bytes(stats["reserved"]),
-        fmt_bytes(stats["peak"]),
-        fmt_bytes(stats["free"]),
-        fmt_bytes(stats["total"]),
+    print(
+        f"[VRAM] {label}\n"
+        f"  Allocated:      {memory['allocated'] / GIB:.3f} GiB\n"
+        f"  Reserved:       {memory['reserved'] / GIB:.3f} GiB\n"
+        f"  Peak allocated: {memory['peak_allocated'] / GIB:.3f} GiB\n"
+        f"  Peak reserved:  {memory['peak_reserved'] / GIB:.3f} GiB\n"
+        f"  Free:           {memory['free'] / GIB:.3f} GiB\n"
+        f"  Total:          {memory['total'] / GIB:.3f} GiB"
     )
 
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
-
-def get_config():
-    """
-    Construct the real configuration from config.py.
-
-    No fallback configuration is created.
-    """
-
-    config = ModelConfig()
-
-    required = [
-        "seed",
-        "device",
-        "dtype",
-        "train_path",
-        "val_path",
-        "block_size",
-        "batch_size",
-        "gradient_accumulation_steps",
-        "learning_rate",
-        "min_lr",
-        "warmup_steps",
-        "max_iters",
-        "eval_interval",
-        "eval_iters",
-        "weight_decay",
-        "betas",
-        "eps",
-        "model_save_folder",
-        "train_samples",
-        "train_sample_max_tokens",
-    ]
-
-    missing = [
-        name for name in required
-        if not hasattr(config, name)
-    ]
-
-    if missing:
-        raise AttributeError(
-            "ModelConfig is missing required fields: "
-            + ", ".join(missing)
-        )
-
-    LOGGER.info(
-        "Configuration loaded from: %s",
-        ModelConfig.__module__,
-    )
-
-    LOGGER.info(
-        "Configuration class: %s",
-        type(config).__name__,
-    )
-
-    LOGGER.info(
-        "Configuration object ID: %s",
-        id(config),
-    )
-
-    return config
-
-
-def get_mtp_setting(config):
-    """
-    Detect the MTP configuration field.
-
-    Supported field names:
-        mtp
-        mtp_heads
-        n_mtp
-        num_mtp_heads
-
-    The first matching field is used.
-    """
-
-    names = (
-        "mtp",
-        "mtp_heads",
-        "n_mtp",
-        "num_mtp_heads",
-    )
-
-    for name in names:
-        if hasattr(config, name):
-            value = getattr(config, name)
-
-            if value is None:
-                continue
-
-            return name, int(value)
-
-    raise AttributeError(
-        "No MTP configuration field found in ModelConfig. "
-        "Expected one of: "
-        + ", ".join(names)
-    )
-
-
-# ============================================================
-# REPRODUCIBILITY
-# ============================================================
-
-def set_seed(seed):
+def seed_everything(seed):
     seed = int(seed)
 
     random.seed(seed)
@@ -262,669 +79,633 @@ def set_seed(seed):
     torch.manual_seed(seed)
 
     if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
 
-    if hasattr(torch.backends, "cudnn"):
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-
-    LOGGER.info("Global random seed: %d", seed)
-
-    LOGGER.info(
-        "Python / NumPy / PyTorch / CUDA RNGs initialized."
-    )
+    print(f"[SEED] Using config.seed = {seed}")
 
 
-# ============================================================
-# DATA
-# ============================================================
+def get_lr(config, step):
+    if config.warmup_steps > 0 and step <= config.warmup_steps:
+        return config.learning_rate * step / config.warmup_steps
 
-def load_dataset(path, split):
-    path = Path(path)
+    progress = (
+        step - config.warmup_steps
+    ) / max(1, config.max_iters - config.warmup_steps)
 
-    if not path.exists():
-        raise FileNotFoundError(
-            f"{split} dataset does not exist: {path}"
+    progress = min(1.0, max(0.0, progress))
+
+    return config.min_lr + (
+        config.learning_rate - config.min_lr
+    ) * (1 + math.cos(math.pi * progress)) / 2
+
+
+def get_model_loss(output):
+    """
+    Expected model output:
+        logits, total_loss, main_loss, mtp_loss
+
+    MTP loss may be:
+        None
+        scalar tensor
+        list/tuple of scalar tensors
+        dictionary of scalar tensors
+    """
+
+    if not isinstance(output, (tuple, list)):
+        raise TypeError(
+            "Model output must be a tuple/list. "
+            "Expected (logits, total_loss, main_loss, mtp_loss)."
         )
 
-    data = np.memmap(
-        path,
-        dtype=np.uint16,
-        mode="r",
-    )
+    if len(output) < 2:
+        raise ValueError("Model output does not contain a loss.")
 
-    if len(data) <= 1:
-        raise ValueError(
-            f"{split} dataset is too small: {len(data)} tokens"
-        )
+    logits = output[0]
+    total_loss = output[1]
 
-    LOGGER.info(
-        "%s dataset loaded | Path=%s | Tokens=%s | Size=%s",
-        split.upper(),
-        path.resolve(),
-        f"{len(data):,}",
-        fmt_bytes(path.stat().st_size),
-    )
+    main_loss = output[2] if len(output) > 2 else total_loss
+    mtp_loss = output[3] if len(output) > 3 else None
 
-    return data
+    return logits, total_loss, main_loss, mtp_loss
 
 
-def validate_dataset(data, block_size, split):
-    required = block_size + 1
-
-    if len(data) < required:
-        raise ValueError(
-            f"{split} dataset has {len(data):,} tokens, "
-            f"but block_size={block_size} requires at least "
-            f"{required:,} tokens."
-        )
-
-
-def get_batch(data, batch_size, block_size, device, rng):
-    """
-    Sample random next-token prediction batches.
-
-    X:
-        Tokens [start : start + block_size]
-
-    Y:
-        Tokens [start + 1 : start + block_size + 1]
-    """
-
-    max_start = len(data) - block_size
-
-    if max_start <= 0:
-        raise ValueError(
-            "Dataset is too small for the configured block_size."
-        )
-
-    indices = rng.integers(
-        low=0,
-        high=max_start,
-        size=batch_size,
-    )
-
-    x = np.stack([
-        data[index:index + block_size]
-        for index in indices
-    ]).astype(np.int64)
-
-    y = np.stack([
-        data[index + 1:index + block_size + 1]
-        for index in indices
-    ]).astype(np.int64)
-
-    X = torch.from_numpy(x).to(
-        device=device,
-        non_blocking=False,
-    )
-
-    Y = torch.from_numpy(y).to(
-        device=device,
-        non_blocking=False,
-    )
-
-    return X, Y
-
-
-# ============================================================
-# TOKENIZER / TEXT SAMPLES
-# ============================================================
-
-def load_tokenizer():
-    """
-    Try common tokenizer locations.
-
-    If no tokenizer is available, sampled token IDs
-    will be printed instead.
-    """
-
-    candidates = [
-        Path("tokenizer/tokenizer.json"),
-        Path("tokenizer.json"),
-    ]
-
-    for path in candidates:
-        if not path.exists():
-            continue
-
-        try:
-            from tokenizers import Tokenizer
-
-            tokenizer = Tokenizer.from_file(
-                str(path)
-            )
-
-            LOGGER.info(
-                "Tokenizer loaded: %s",
-                path.resolve(),
-            )
-
-            return tokenizer
-
-        except Exception as exc:
-            LOGGER.warning(
-                "Tokenizer loading failed for %s: %s",
-                path,
-                exc,
-            )
-
-    LOGGER.warning(
-        "No compatible tokenizer found. "
-        "Evaluation samples will print token IDs."
-    )
-
-    return None
-
-
-def decode_tokens(tokens, tokenizer):
-    tokens = [int(token) for token in tokens]
-
-    if tokenizer is None:
-        return " ".join(map(str, tokens))
-
-    try:
-        return tokenizer.decode(
-            tokens,
-            skip_special_tokens=False,
-        )
-
-    except Exception:
-        return " ".join(map(str, tokens))
-
-
-def print_random_samples(
-    train_data,
-    val_data,
-    tokenizer,
-    sample_count,
-    max_tokens,
-    seed,
-):
-    """
-    Print randomly selected snippets from train.bin and val.bin.
-
-    The configured total sample count is split equally:
-        train_samples=8 -> 4 train + 4 validation snippets.
-
-    Sampling uses a separate RNG so that evaluation samples
-    do not alter the training batch RNG sequence.
-    """
-
-    if sample_count <= 0:
-        LOGGER.info(
-            "Evaluation samples disabled: train_samples=%d",
-            sample_count,
-        )
-        return
-
-    if max_tokens <= 0:
-        LOGGER.warning(
-            "Evaluation samples disabled: "
-            "train_sample_max_tokens=%d",
-            max_tokens,
-        )
-        return
-
-    train_count = sample_count // 2
-    val_count = sample_count - train_count
-
-    rng = np.random.default_rng(
-        seed + 1234567
-    )
-
-    section("RANDOM TRAIN / VALIDATION TEXT SAMPLES")
-
-    LOGGER.info(
-        "Configured samples=%d | Train=%d | Validation=%d | "
-        "Maximum tokens per snippet=%d",
-        sample_count,
-        train_count,
-        val_count,
-        max_tokens,
-    )
-
-    def print_split(data, split, count):
-        LOGGER.info("")
-        LOGGER.info("-" * 100)
-        LOGGER.info("%s.BIN SAMPLES", split.upper())
-        LOGGER.info("-" * 100)
-
-        for sample_index in range(count):
-            available = len(data)
-
-            if available <= 0:
-                LOGGER.warning(
-                    "%s dataset is empty.",
-                    split,
-                )
-                return
-
-            start = int(
-                rng.integers(0, available)
-            )
-
-            end = min(
-                start + max_tokens,
-                available,
-            )
-
-            tokens = data[start:end]
-
-            text = decode_tokens(
-                tokens,
-                tokenizer,
-            )
-
-            LOGGER.info(
-                "%s sample %d/%d | "
-                "Start token=%d | "
-                "Sample tokens=%d",
-                split.upper(),
-                sample_index + 1,
-                count,
-                start,
-                len(tokens),
-            )
-
-            print(text, flush=True)
-
-            LOGGER.info("-" * 100)
-
-    print_split(
-        train_data,
-        "train",
-        train_count,
-    )
-
-    print_split(
-        val_data,
-        "val",
-        val_count,
-    )
-
-
-# ============================================================
-# MODEL DIAGNOSTICS
-# ============================================================
-
-def parameter_count(module):
-    return sum(
-        parameter.numel()
-        for parameter in module.parameters()
-    )
-
-
-def parameter_bytes(module):
-    return sum(
-        parameter.numel() * parameter.element_size()
-        for parameter in module.parameters()
-    )
-
-
-def log_model_structure(model, device):
-    """
-    Print model architecture and per-module parameter memory.
-
-    This is a pre-training diagnostic.
-
-    Module parameter memory is an estimate based on the
-    parameters' actual dtype and size.
-
-    CUDA VRAM is measured globally after model placement.
-    """
-
-    section("MODEL ARCHITECTURE AND MEMORY DIAGNOSTICS")
-
-    total_params = parameter_count(model)
-
-    LOGGER.info(
-        "Total parameters: %s",
-        f"{total_params:,}",
-    )
-
-    LOGGER.info(
-        "Total parameter memory: %s",
-        fmt_bytes(parameter_bytes(model)),
-    )
-
-    LOGGER.info(
-        "Module diagnostics include all named modules, "
-        "including attention, MLP, MoE and expert modules."
-    )
-
-    LOGGER.info(
-        "Per-module parameter memory is not additive "
-        "when modules share parameters."
-    )
-
-    for name, module in model.named_modules():
-        if not name:
-            name = "<root>"
-
-        count = parameter_count(module)
-
-        direct_count = sum(
-            parameter.numel()
-            for parameter in module.parameters(
-                recurse=False
-            )
-        )
-
-        memory = parameter_bytes(module)
-
-        LOGGER.info(
-            "MODULE | %-60s | "
-            "Type=%-30s | "
-            "Parameters=%12s | "
-            "Direct parameters=%12s | "
-            "Parameter memory=%s",
-            name,
-            module.__class__.__name__,
-            f"{count:,}",
-            f"{direct_count:,}",
-            fmt_bytes(memory),
-        )
-
-    log_vram(
-        "Model structure diagnostic complete",
-        device,
-    )
-
-
-def log_startup_config(
-    config,
-    device,
-    dtype,
-    mtp_name,
-    mtp_value,
-):
-    section("TRAINING CONFIGURATION")
-
-    values = {
-        "Config class": type(config).__name__,
-        "Config module": ModelConfig.__module__,
-        "Seed": config.seed,
-        "Device": device,
-        "Dtype": dtype,
-        "MTP field": mtp_name,
-        "MTP value": mtp_value,
-        "MTP enabled": mtp_value > 0,
-        "Train dataset": config.train_path,
-        "Validation dataset": config.val_path,
-        "Block size": config.block_size,
-        "Batch size": config.batch_size,
-        "Gradient accumulation": config.gradient_accumulation_steps,
-        "Tokens per optimizer step": (
-            config.batch_size
-            * config.gradient_accumulation_steps
-            * config.block_size
-        ),
-        "Maximum iterations": config.max_iters,
-        "Warmup steps": config.warmup_steps,
-        "Evaluation interval": config.eval_interval,
-        "Evaluation batches": config.eval_iters,
-        "Learning rate": config.learning_rate,
-        "Minimum learning rate": config.min_lr,
-        "Weight decay": config.weight_decay,
-        "Betas": config.betas,
-        "Epsilon": config.eps,
-        "Compile": getattr(config, "compile", False),
-        "Train samples per evaluation": config.train_samples,
-        "Sample maximum tokens": config.train_sample_max_tokens,
-        "Checkpoint folder": config.model_save_folder,
-    }
-
-    for key, value in values.items():
-        LOGGER.info("%-35s : %s", key, value)
-
-
-# ============================================================
-# LOSS HANDLING
-# ============================================================
-
-def extract_loss_value(value):
-    """
-    Convert a scalar tensor or numeric value to float.
-    """
-
-    if value is None:
-        return 0.0
-
-    if torch.is_tensor(value):
-        if value.numel() != 1:
-            return None
-
-        return float(value.detach().float().item())
-
-    try:
-        return float(value)
-
-    except (TypeError, ValueError):
-        return None
-
-
-def extract_mtp_losses(mtp_loss):
-    """
-    Extract per-horizon MTP losses where available.
-
-    Supported forms:
-
-        scalar tensor:
-            One combined MTP loss.
-
-        list / tuple:
-            One loss per prediction horizon.
-
-        dictionary:
-            Horizon name -> loss.
-    """
-
+def normalize_mtp_losses(mtp_loss):
     if mtp_loss is None:
         return {}
 
     if isinstance(mtp_loss, dict):
-        results = {}
+        return mtp_loss
 
-        for name, value in mtp_loss.items():
-            loss_value = extract_loss_value(value)
+    if isinstance(mtp_loss, (tuple, list)):
+        return {
+            f"mtp_{index + 1}": loss
+            for index, loss in enumerate(mtp_loss)
+        }
 
-            if loss_value is not None:
-                results[str(name)] = loss_value
+    return {"mtp": mtp_loss}
 
-        return results
 
-    if isinstance(mtp_loss, (list, tuple)):
-        results = {}
-
-        for index, value in enumerate(mtp_loss):
-            loss_value = extract_loss_value(value)
-
-            if loss_value is not None:
-                results[f"horizon_{index + 1}"] = loss_value
-
-        return results
-
-    value = extract_loss_value(mtp_loss)
-
+def tensor_to_float(value):
     if value is None:
-        return {}
+        return None
 
-    return {
-        "combined": value,
-    }
+    if torch.is_tensor(value):
+        return float(value.detach().float().mean().item())
+
+    return float(value)
 
 
-def format_mtp_losses(mtp_losses):
-    if not mtp_losses:
-        return "disabled / unavailable"
-
-    return " | ".join(
-        f"{name}={value:.5f}"
-        for name, value in mtp_losses.items()
+def print_loss_summary(losses):
+    print(
+        f"  Main loss:  {losses['main']:.6f}\n"
+        f"  Total loss: {losses['total']:.6f}"
     )
 
+    if losses["mtp"]:
+        for name, value in losses["mtp"].items():
+            print(f"  {name}: {value:.6f}")
+    else:
+        print("  MTP: DISABLED")
+
 
 # ============================================================
-# LEARNING RATE
+# Token dataset
 # ============================================================
 
-def get_learning_rate(config, step):
-    warmup_steps = int(config.warmup_steps)
+class TokenDataset:
 
-    if warmup_steps > 0 and step <= warmup_steps:
+    def __init__(self, path, block_size, device, name):
+        self.path = Path(path)
+        self.block_size = block_size
+        self.device = device
+        self.name = name
+
+        if not self.path.exists():
+            raise FileNotFoundError(
+                f"{name} dataset not found: {self.path}"
+            )
+
+        self.data = np.memmap(
+            self.path,
+            dtype=np.uint16,
+            mode="r",
+        )
+
+        minimum_length = block_size + 2
+
+        if len(self.data) < minimum_length:
+            raise ValueError(
+                f"{name} dataset contains {len(self.data)} tokens. "
+                f"At least {minimum_length} are required."
+            )
+
+        print(
+            f"[DATA] {name}\n"
+            f"  Path: {self.path.resolve()}\n"
+            f"  Tokens: {len(self.data):,}\n"
+            f"  Size: {self.data.nbytes / 1024**2:.2f} MiB"
+        )
+
+    def get_batch(self, batch_size):
+        max_start = len(self.data) - self.block_size - 1
+
+        indices = np.random.randint(
+            0,
+            max_start + 1,
+            size=batch_size,
+        )
+
+        x = np.stack([
+            self.data[i:i + self.block_size]
+            for i in indices
+        ]).astype(np.int64)
+
+        y = np.stack([
+            self.data[i + 1:i + self.block_size + 1]
+            for i in indices
+        ]).astype(np.int64)
+
         return (
-            config.learning_rate
-            * step
-            / warmup_steps
+            torch.from_numpy(x).to(self.device),
+            torch.from_numpy(y).to(self.device),
         )
 
-    progress = (
-        step - warmup_steps
-    ) / max(
-        1,
-        config.max_iters - warmup_steps,
-    )
+    def get_random_snippets(self, count, max_tokens):
+        """
+        Random contiguous token snippets.
+        They may cross sentence boundaries because bin files
+        do not preserve explicit sentence-boundary metadata.
+        """
 
-    progress = min(
-        max(progress, 0.0),
-        1.0,
-    )
+        length = min(max_tokens, len(self.data) - 1)
 
-    return (
-        config.min_lr
-        + (
-            config.learning_rate
-            - config.min_lr
+        max_start = len(self.data) - length
+
+        starts = np.random.randint(
+            0,
+            max_start + 1,
+            size=count,
         )
-        * (
-            1 + math.cos(math.pi * progress)
-        )
-        / 2
-    )
+
+        snippets = []
+
+        for start in starts:
+            snippet = np.asarray(
+                self.data[start:start + length],
+                dtype=np.int64,
+            ).copy()
+
+            snippets.append(snippet)
+
+        return snippets
 
 
 # ============================================================
-# EVALUATION
+# Tokenizer
+# ============================================================
+
+def load_tokenizer(config):
+    tokenizer_path = getattr(config, "tokenizer_path", None)
+
+    if tokenizer_path is None:
+        print("[TOKENIZER] No tokenizer_path in config.")
+        return None
+
+    tokenizer_path = Path(tokenizer_path)
+
+    if not tokenizer_path.exists():
+        print(
+            f"[TOKENIZER] Not found: {tokenizer_path}\n"
+            "  Samples will be printed as token IDs."
+        )
+
+        return None
+
+    try:
+        from tokenizers import Tokenizer
+
+        tokenizer = Tokenizer.from_file(str(tokenizer_path))
+
+        print(
+            f"[TOKENIZER] Loaded: "
+            f"{tokenizer_path.resolve()}"
+        )
+
+        return tokenizer
+
+    except Exception as error:
+        print(
+            f"[TOKENIZER] Could not load tokenizer: {error}\n"
+            "  Samples will be printed as token IDs."
+        )
+
+        return None
+
+
+def decode_tokens(tokenizer, tokens):
+    if tokenizer is None:
+        return " ".join(map(str, tokens.tolist()))
+
+    try:
+        return tokenizer.decode(
+            tokens.tolist(),
+            skip_special_tokens=False,
+        )
+
+    except Exception as error:
+        return f"[Decode error: {error}]"
+
+
+# ============================================================
+# Model diagnostics
+# ============================================================
+
+def print_model_summary(model, config):
+    parameters = list(model.parameters())
+
+    total_params = sum(
+        parameter.numel()
+        for parameter in parameters
+    )
+
+    trainable_params = sum(
+        parameter.numel()
+        for parameter in parameters
+        if parameter.requires_grad
+    )
+
+    parameter_bytes = sum(
+        parameter.numel() * parameter.element_size()
+        for parameter in parameters
+    )
+
+    buffer_bytes = sum(
+        buffer.numel() * buffer.element_size()
+        for buffer in model.buffers()
+    )
+
+    print("\n" + "=" * 80)
+    print("MODEL SUMMARY")
+    print("=" * 80)
+
+    print(f"Model class: {model.__class__.__name__}")
+    print(f"Parameters: {total_params:,}")
+    print(f"Trainable parameters: {trainable_params:,}")
+    print(f"Parameter memory: {parameter_bytes / GIB:.4f} GiB")
+    print(f"Buffer memory: {buffer_bytes / GIB:.4f} GiB")
+
+    print(
+        f"Architecture: "
+        f"{config.n_layer} layers | "
+        f"{config.n_embd} embedding | "
+        f"{config.n_head} attention heads"
+    )
+
+    print(
+        f"MoE: {config.n_experts} experts | "
+        f"Top-{config.n_experts_per_token}"
+    )
+
+    mtp_heads = getattr(config, "mtp_num_heads", 0)
+
+    print(
+        f"MTP: {'ENABLED' if mtp_heads > 0 else 'DISABLED'}"
+        f" | Heads: {mtp_heads}"
+    )
+
+    print("=" * 80 + "\n")
+
+
+def print_module_summary(model):
+    print("\n" + "=" * 80)
+    print("MODULE TREE")
+    print("=" * 80)
+
+    for name, module in model.named_modules():
+        if not name:
+            continue
+
+        params = sum(
+            parameter.numel()
+            for parameter in module.parameters(recurse=False)
+        )
+
+        buffers = sum(
+            buffer.numel()
+            for buffer in module.buffers(recurse=False)
+        )
+
+        if params == 0 and buffers == 0:
+            continue
+
+        print(
+            f"{name:<65} "
+            f"{module.__class__.__name__:<24} "
+            f"params={params:,}"
+        )
+
+    print("=" * 80 + "\n")
+
+
+@torch.inference_mode()
+def run_component_diagnostics(model, config, device, autocast):
+    """
+    Executes one small forward pass before training.
+
+    Reports module names, execution time, output shape,
+    and CUDA memory snapshots.
+
+    This is a diagnostic pass, not a training iteration.
+    """
+
+    print("\n" + "=" * 80)
+    print("PRE-TRAINING COMPONENT DIAGNOSTICS")
+    print("=" * 80)
+
+    model.eval()
+
+    handles = []
+    module_stats = {}
+
+    def make_hook(name):
+        def hook(module, inputs, output):
+            if device == "cuda":
+                torch.cuda.synchronize()
+
+            now = time.perf_counter()
+
+            previous = module_stats.get(name)
+
+            start_time = (
+                previous["start"]
+                if previous is not None
+                else now
+            )
+
+            output_shape = None
+
+            if torch.is_tensor(output):
+                output_shape = tuple(output.shape)
+
+            elif isinstance(output, (tuple, list)):
+                output_shape = [
+                    tuple(item.shape)
+                    for item in output
+                    if torch.is_tensor(item)
+                ]
+
+            elif isinstance(output, dict):
+                output_shape = {
+                    key: tuple(value.shape)
+                    for key, value in output.items()
+                    if torch.is_tensor(value)
+                }
+
+            memory = get_vram()
+
+            module_stats[name] = {
+                "start": start_time,
+                "time": now - start_time,
+                "shape": output_shape,
+                "allocated": (
+                    memory["allocated"]
+                    if memory is not None
+                    else 0
+                ),
+                "peak": (
+                    memory["peak_allocated"]
+                    if memory is not None
+                    else 0
+                ),
+            }
+
+        return hook
+
+    for name, module in model.named_modules():
+        if not name:
+            continue
+
+        handles.append(
+            module.register_forward_hook(
+                make_hook(name)
+            )
+        )
+
+    if device == "cuda":
+        torch.cuda.reset_peak_memory_stats()
+
+    start_time = time.perf_counter()
+
+    try:
+        x = torch.randint(
+            0,
+            config.vocab_size,
+            (1, config.block_size),
+            device=device,
+        )
+
+        y = torch.randint(
+            0,
+            config.vocab_size,
+            (1, config.block_size),
+            device=device,
+        )
+
+        with autocast():
+            output = model(x, y)
+
+        _, loss, _, _ = get_model_loss(output)
+
+        if device == "cuda":
+            torch.cuda.synchronize()
+
+        elapsed = time.perf_counter() - start_time
+
+        print(f"Diagnostic forward completed in {elapsed:.3f}s")
+        print(f"Diagnostic loss: {tensor_to_float(loss):.6f}")
+
+    except Exception as error:
+        print(
+            "\n[DIAGNOSTIC WARNING] "
+            f"Forward diagnostic failed: {error}"
+        )
+
+        print(
+            "The actual model interface or a diagnostic "
+            "configuration may need adjustment."
+        )
+
+        raise
+
+    finally:
+        for handle in handles:
+            handle.remove()
+
+        model.train()
+
+    print("\nCOMPONENT REPORT")
+
+    for name, stats in module_stats.items():
+        print(
+            f"\n{name}\n"
+            f"  Output shape: {stats['shape']}\n"
+            f"  Execution time: {stats['time']:.6f}s"
+        )
+
+        if device == "cuda":
+            print(
+                f"  Allocated after component: "
+                f"{stats['allocated'] / GIB:.3f} GiB\n"
+                f"  Peak allocated: "
+                f"{stats['peak'] / GIB:.3f} GiB"
+            )
+
+    print("\n" + "=" * 80)
+    print("END COMPONENT DIAGNOSTICS")
+    print("=" * 80 + "\n")
+
+
+# ============================================================
+# Evaluation
 # ============================================================
 
 @torch.inference_mode()
 def estimate_loss(
     model,
     config,
-    train_data,
-    val_data,
+    train_dataset,
+    val_dataset,
     device,
-    dtype,
-    amp,
-    eval_rng,
+    autocast,
 ):
+    was_training = model.training
     model.eval()
 
-    losses = {}
+    results = {}
 
-    split_data = {
-        "train": train_data,
-        "val": val_data,
-    }
-
-    for split, data in split_data.items():
-        total_loss = 0.0
-        total_main_loss = 0.0
-
-        mtp_totals = {}
+    for split, dataset in (
+        ("train", train_dataset),
+        ("val", val_dataset),
+    ):
+        total_losses = []
+        main_losses = []
+        mtp_losses = {}
 
         for _ in range(config.eval_iters):
-            X, Y = get_batch(
-                data,
-                config.batch_size,
-                config.block_size,
-                device,
-                eval_rng,
+            x, y = dataset.get_batch(config.batch_size)
+
+            with autocast():
+                output = model(x, y)
+
+            _, total, main, mtp = get_model_loss(output)
+
+            total_losses.append(
+                tensor_to_float(total)
             )
 
-            with torch.autocast(
-                device_type=device.type,
-                dtype=dtype,
-                enabled=amp,
-            ):
-                _, loss, main_loss, mtp_loss = model(
-                    X,
-                    Y,
+            main_losses.append(
+                tensor_to_float(main)
+            )
+
+            for name, value in normalize_mtp_losses(mtp).items():
+                mtp_losses.setdefault(name, [])
+
+                mtp_losses[name].append(
+                    tensor_to_float(value)
                 )
 
-            total_loss += extract_loss_value(loss)
-            total_main_loss += extract_loss_value(main_loss)
-
-            for name, value in extract_mtp_losses(
-                mtp_loss
-            ).items():
-                mtp_totals[name] = (
-                    mtp_totals.get(name, 0.0)
-                    + value
-                )
-
-        losses[split] = {
-            "loss": total_loss / config.eval_iters,
-            "main": total_main_loss / config.eval_iters,
+        results[split] = {
+            "total": float(np.mean(total_losses)),
+            "main": float(np.mean(main_losses)),
             "mtp": {
-                name: value / config.eval_iters
-                for name, value in mtp_totals.items()
+                name: float(np.mean(values))
+                for name, values in mtp_losses.items()
             },
         }
 
-    model.train()
+    model.train(was_training)
 
-    return losses
+    return results
+
+
+def print_samples(
+    train_dataset,
+    val_dataset,
+    tokenizer,
+    config,
+):
+    count = int(config.train_samples)
+
+    if count <= 0:
+        print("[SAMPLES] train_samples <= 0. Skipping.")
+        return
+
+    train_count = count // 2
+    val_count = count - train_count
+
+    max_tokens = int(config.train_sample_max_tokens)
+
+    print("\n" + "=" * 80)
+    print(
+        f"RANDOM DATASET SAMPLES | "
+        f"{train_count} TRAIN + {val_count} VALIDATION"
+    )
+    print("=" * 80)
+
+    for name, dataset, sample_count in (
+        ("TRAIN.BIN", train_dataset, train_count),
+        ("VAL.BIN", val_dataset, val_count),
+    ):
+        print(f"\n--- {name} ---")
+
+        snippets = dataset.get_random_snippets(
+            sample_count,
+            max_tokens,
+        )
+
+        for index, snippet in enumerate(snippets, 1):
+            text = decode_tokens(tokenizer, snippet)
+
+            print(
+                f"\n[{name} SAMPLE {index}]\n"
+                f"Tokens: {len(snippet)}\n"
+                f"{text}"
+            )
+
+    print("\n" + "=" * 80 + "\n")
 
 
 # ============================================================
-# TRAINING
+# Training
 # ============================================================
 
-def train_model():
-    setup_logging()
+def train_model(config=None):
 
-    section("LM TRAINING INITIALIZATION")
+    # Explicit configuration injection.
+    # No alternate configuration is constructed when supplied.
+    if config is None:
+        config = ModelConfig()
 
-    startup_time = time.perf_counter()
+    print("\n" + "=" * 80)
+    print(f"{config.model_family_name} — TRAINING")
+    print("=" * 80)
 
-    # --------------------------------------------------------
-    # Configuration
-    # --------------------------------------------------------
+    print(f"Config class: {config.__class__.__name__}")
+    print(f"Config source: {ModelConfig.__module__}")
+    print(f"Seed: {config.seed}")
 
-    config = get_config()
+    seed_everything(config.seed)
 
-    seed = int(config.seed)
-
-    set_seed(seed)
-
-    mtp_name, mtp_value = get_mtp_setting(
-        config
+    config.model_save_folder.mkdir(
+        parents=True,
+        exist_ok=True,
     )
 
-    if mtp_value < 0:
-        raise ValueError(
-            f"{mtp_name} must be >= 0, got {mtp_value}"
-        )
-
-    # --------------------------------------------------------
-    # Device / dtype
-    # --------------------------------------------------------
-
-    requested_device = str(config.device)
-
-    if (
-        requested_device.startswith("cuda")
-        and torch.cuda.is_available()
-    ):
-        device = torch.device(
-            requested_device
-        )
-
-    else:
-        device = torch.device("cpu")
+    device = (
+        config.device
+        if config.device == "cuda" and torch.cuda.is_available()
+        else "cpu"
+    )
 
     dtype_map = {
         "float16": torch.float16,
@@ -937,203 +718,113 @@ def train_model():
             f"Unsupported dtype: {config.dtype}"
         )
 
-    dtype = dtype_map[
-        config.dtype
-    ]
+    dtype = dtype_map[config.dtype]
 
     amp = (
-        device.type == "cuda"
+        device == "cuda"
         and dtype != torch.float32
     )
 
     scaler = torch.amp.GradScaler(
         "cuda",
-        enabled=(
-            amp
-            and dtype == torch.float16
-        ),
+        enabled=amp and dtype == torch.float16,
     )
 
-    config.model_save_folder.mkdir(
-        parents=True,
-        exist_ok=True,
+    def autocast():
+        return torch.autocast(
+            device_type=device,
+            dtype=dtype,
+            enabled=amp,
+        )
+
+    print(f"\nDevice: {device}")
+    print(f"Dtype: {config.dtype}")
+    print(f"AMP enabled: {amp}")
+    print(f"Compile enabled: {config.compile}")
+
+    if device == "cuda":
+        properties = torch.cuda.get_device_properties(0)
+
+        print(
+            f"GPU: {properties.name}\n"
+            f"Compute capability: "
+            f"{properties.major}.{properties.minor}\n"
+            f"Total VRAM: {properties.total_memory / GIB:.3f} GiB"
+        )
+
+    print("\nLoading datasets...")
+
+    train_dataset = TokenDataset(
+        config.train_path,
+        config.block_size,
+        device,
+        "TRAIN",
     )
 
-    log_startup_config(
+    val_dataset = TokenDataset(
+        config.val_path,
+        config.block_size,
+        device,
+        "VALIDATION",
+    )
+
+    tokenizer = load_tokenizer(config)
+
+    print("\nBuilding model...")
+
+    if device == "cuda":
+        torch.cuda.reset_peak_memory_stats()
+
+    load_start = time.perf_counter()
+
+    # This is the exact config object passed to Model.
+    model = Model(config).to(device)
+
+    if device == "cuda":
+        torch.cuda.synchronize()
+
+    model_load_time = time.perf_counter() - load_start
+
+    print(
+        f"Model constructed in "
+        f"{model_load_time:.3f}s"
+    )
+
+    print_vram("After model construction")
+
+    print_model_summary(model, config)
+    print_module_summary(model)
+
+    # Diagnostic forward before compilation and training.
+    run_component_diagnostics(
+        model,
         config,
         device,
-        dtype,
-        mtp_name,
-        mtp_value,
+        autocast,
     )
 
-    if device.type == "cuda":
-        properties = torch.cuda.get_device_properties(
-            device
-        )
-
-        section("GPU INFORMATION")
-
-        LOGGER.info(
-            "GPU name: %s",
-            properties.name,
-        )
-
-        LOGGER.info(
-            "GPU capability: %s",
-            torch.cuda.get_device_capability(device),
-        )
-
-        LOGGER.info(
-            "Total VRAM: %s",
-            fmt_bytes(properties.total_memory),
-        )
-
-        LOGGER.info(
-            "CUDA version: %s",
-            torch.version.cuda,
-        )
-
-        LOGGER.info(
-            "PyTorch version: %s",
-            torch.__version__,
-        )
-
-        log_vram(
-            "Before dataset loading",
-            device,
-        )
-
-    # --------------------------------------------------------
-    # Datasets
-    # --------------------------------------------------------
-
-    section("DATASET LOADING")
-
-    dataset_start = time.perf_counter()
-
-    train_data = load_dataset(
-        config.train_path,
-        "train",
-    )
-
-    val_data = load_dataset(
-        config.val_path,
-        "val",
-    )
-
-    validate_dataset(
-        train_data,
-        config.block_size,
-        "train",
-    )
-
-    validate_dataset(
-        val_data,
-        config.block_size,
-        "val",
-    )
-
-    LOGGER.info(
-        "Dataset loading completed in %s",
-        fmt_time(
-            time.perf_counter() - dataset_start
-        ),
-    )
-
-    # Separate RNGs keep training/evaluation sampling
-    # reproducible and independent.
-    train_rng = np.random.default_rng(
-        seed
-    )
-
-    eval_rng = np.random.default_rng(
-        seed + 1
-    )
-
-    # --------------------------------------------------------
-    # Model construction
-    # --------------------------------------------------------
-
-    section("MODEL CONSTRUCTION")
-
-    model_start = time.perf_counter()
-
-    log_vram(
-        "Before model construction",
-        device,
-    )
-
-    model = Model(config)
-
-    LOGGER.info(
-        "Model constructor completed in %s",
-        fmt_time(
-            time.perf_counter() - model_start
-        ),
-    )
-
-    model = model.to(
-        device
-    )
-
-    synchronize(device)
-
-    LOGGER.info(
-        "Model moved to %s",
-        device,
-    )
-
-    log_vram(
-        "After model.to(device)",
-        device,
-    )
-
-    # --------------------------------------------------------
-    # Model structure
-    # --------------------------------------------------------
-
-    log_model_structure(
-        model,
-        device,
-    )
-
-    # --------------------------------------------------------
-    # Compilation
-    # --------------------------------------------------------
-
-    compile_enabled = bool(
-        getattr(config, "compile", False)
-    )
-
-    if compile_enabled:
-        section("MODEL COMPILATION")
+    if config.compile:
+        print("\nCompiling model...")
 
         compile_start = time.perf_counter()
 
-        LOGGER.info(
-            "torch.compile enabled. "
-            "Compilation may happen lazily on the first forward pass."
+        model = torch.compile(model)
+
+        print(
+            f"torch.compile wrapper created in "
+            f"{time.perf_counter() - compile_start:.3f}s"
         )
 
-        model = torch.compile(
-            model
+        print(
+            "Note: actual compilation may happen during "
+            "the first training forward."
         )
 
-        LOGGER.info(
-            "torch.compile wrapper created in %s",
-            fmt_time(
-                time.perf_counter() - compile_start
-            ),
-        )
-
-    # --------------------------------------------------------
-    # Optimizer
-    # --------------------------------------------------------
-
-    section("OPTIMIZER INITIALIZATION")
-
-    optimizer_start = time.perf_counter()
+    raw_model = (
+        model._orig_mod
+        if hasattr(model, "_orig_mod")
+        else model
+    )
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -1143,100 +834,10 @@ def train_model():
         eps=config.eps,
     )
 
-    LOGGER.info(
-        "AdamW initialized in %s",
-        fmt_time(
-            time.perf_counter() - optimizer_start
-        ),
+    total_params = sum(
+        parameter.numel()
+        for parameter in raw_model.parameters()
     )
-
-    raw_model = (
-        model._orig_mod
-        if hasattr(model, "_orig_mod")
-        else model
-    )
-
-    total_params = parameter_count(
-        raw_model
-    )
-
-    LOGGER.info(
-        "Trainable parameters: %s",
-        f"{sum(p.numel() for p in raw_model.parameters() if p.requires_grad):,}",
-    )
-
-    LOGGER.info(
-        "Total parameters: %s",
-        f"{total_params:,}",
-    )
-
-    log_vram(
-        "After optimizer initialization",
-        device,
-    )
-
-    # --------------------------------------------------------
-    # Tokenizer
-    # --------------------------------------------------------
-
-    tokenizer = load_tokenizer()
-
-    # --------------------------------------------------------
-    # Training preparation
-    # --------------------------------------------------------
-
-    section("TRAINING START")
-
-    LOGGER.info(
-        "Total optimizer steps: %s",
-        f"{config.max_iters:,}",
-    )
-
-    LOGGER.info(
-        "Tokens per optimizer step: %s",
-        f"{config.batch_size * config.gradient_accumulation_steps * config.block_size:,}",
-    )
-
-    LOGGER.info(
-        "MTP configuration: %s=%d",
-        mtp_name,
-        mtp_value,
-    )
-
-    if mtp_value == 0:
-        LOGGER.info(
-            "MTP is disabled by configuration."
-        )
-
-    else:
-        LOGGER.info(
-            "MTP is enabled. Individual horizon losses "
-            "will be reported when exposed by model.forward."
-        )
-
-    LOGGER.info(
-        "Training begins after %.2f seconds of initialization.",
-        time.perf_counter() - startup_time,
-    )
-
-    log_vram(
-        "Immediately before training",
-        device,
-    )
-
-    best_val_loss = float("inf")
-
-    optimizer.zero_grad(
-        set_to_none=True
-    )
-
-    model.train()
-
-    training_start = time.perf_counter()
-
-    previous_log_time = training_start
-
-    cumulative_tokens = 0
 
     tokens_per_step = (
         config.batch_size
@@ -1244,231 +845,187 @@ def train_model():
         * config.block_size
     )
 
-    # --------------------------------------------------------
-    # Main loop
-    # --------------------------------------------------------
+    print("\n" + "=" * 80)
+    print("TRAINING CONFIGURATION")
+    print("=" * 80)
 
-    progress_bar = tqdm(
-        range(
-            1,
-            config.max_iters + 1,
-        ),
+    print(f"Parameters: {total_params:,}")
+    print(f"Batch size: {config.batch_size}")
+    print(
+        f"Gradient accumulation: "
+        f"{config.gradient_accumulation_steps}"
+    )
+
+    print(f"Tokens per optimizer step: {tokens_per_step:,}")
+    print(f"Maximum iterations: {config.max_iters}")
+    print(f"Warmup steps: {config.warmup_steps}")
+    print(f"Evaluation interval: {config.eval_interval}")
+    print(f"Evaluation batches per split: {config.eval_iters}")
+
+    print(
+        f"Training samples per evaluation: "
+        f"{config.train_samples}"
+    )
+
+    print(
+        f"Maximum sample length: "
+        f"{config.train_sample_max_tokens}"
+    )
+
+    print("=" * 80 + "\n")
+
+    best_val_loss = float("inf")
+
+    optimizer.zero_grad(set_to_none=True)
+    model.train()
+
+    training_start = time.perf_counter()
+
+    iteration_times = []
+    running_tokens = 0
+
+    progress = tqdm(
+        range(1, config.max_iters + 1),
         desc="Training",
         dynamic_ncols=True,
     )
 
-    for step in progress_bar:
-        step_start = time.perf_counter()
+    for step in progress:
 
-        lr = get_learning_rate(
-            config,
-            step,
-        )
+        iteration_start = time.perf_counter()
+
+        lr = get_lr(config, step)
 
         for group in optimizer.param_groups:
             group["lr"] = lr
 
-        if device.type == "cuda":
-            torch.cuda.reset_peak_memory_stats(
-                device
-            )
+        if device == "cuda":
+            torch.cuda.reset_peak_memory_stats()
 
         total_loss = 0.0
-        main_loss_total = 0.0
-
-        mtp_loss_totals = {}
-
-        # ----------------------------------------------------
-        # Gradient accumulation
-        # ----------------------------------------------------
+        main_loss = 0.0
+        mtp_loss = {}
 
         for accumulation_step in range(
             config.gradient_accumulation_steps
         ):
-            X, Y = get_batch(
-                train_data,
-                config.batch_size,
-                config.block_size,
-                device,
-                train_rng,
+            x, y = train_dataset.get_batch(
+                config.batch_size
             )
 
-            with torch.autocast(
-                device_type=device.type,
-                dtype=dtype,
-                enabled=amp,
-            ):
-                _, loss, main_loss, mtp_loss = model(
-                    X,
-                    Y,
-                )
+            with autocast():
+                output = model(x, y)
 
-                scaled_loss = (
+                _, loss, main, mtp = get_model_loss(output)
+
+                loss = (
                     loss
                     / config.gradient_accumulation_steps
                 )
 
-            scaler.scale(
-                scaled_loss
-            ).backward()
+            scaler.scale(loss).backward()
 
-            total_loss += extract_loss_value(
-                loss
+            total_loss += tensor_to_float(loss) * (
+                config.gradient_accumulation_steps
             )
 
-            main_loss_total += extract_loss_value(
-                main_loss
-            )
+            main_loss += tensor_to_float(main)
 
-            for name, value in extract_mtp_losses(
-                mtp_loss
-            ).items():
-                mtp_loss_totals[name] = (
-                    mtp_loss_totals.get(name, 0.0)
-                    + value
-                )
+            for name, value in normalize_mtp_losses(mtp).items():
+                mtp_loss.setdefault(name, 0.0)
 
-        # ----------------------------------------------------
-        # Optimizer step
-        # ----------------------------------------------------
+                mtp_loss[name] += tensor_to_float(value)
 
-        scaler.step(
-            optimizer
-        )
-
+        scaler.step(optimizer)
         scaler.update()
 
-        optimizer.zero_grad(
-            set_to_none=True
+        optimizer.zero_grad(set_to_none=True)
+
+        total_loss /= config.gradient_accumulation_steps
+        main_loss /= config.gradient_accumulation_steps
+
+        for name in mtp_loss:
+            mtp_loss[name] /= (
+                config.gradient_accumulation_steps
+            )
+
+        if device == "cuda":
+            torch.cuda.synchronize()
+
+        iteration_time = (
+            time.perf_counter() - iteration_start
         )
 
-        total_loss /= (
-            config.gradient_accumulation_steps
-        )
+        iteration_times.append(iteration_time)
 
-        main_loss_total /= (
-            config.gradient_accumulation_steps
-        )
-
-        mtp_loss_totals = {
-            name: value / config.gradient_accumulation_steps
-            for name, value in mtp_loss_totals.items()
-        }
-
-        synchronize(device)
-
-        step_time = (
-            time.perf_counter()
-            - step_start
-        )
-
-        cumulative_tokens += tokens_per_step
+        running_tokens += tokens_per_step
 
         tokens_per_second = (
-            tokens_per_step
-            / max(step_time, 1e-12)
+            tokens_per_step / max(iteration_time, 1e-9)
         )
 
         elapsed = (
-            time.perf_counter()
-            - training_start
+            time.perf_counter() - training_start
         )
 
-        average_tokens_per_second = (
-            cumulative_tokens
-            / max(elapsed, 1e-12)
+        average_iteration_time = float(
+            np.mean(iteration_times)
         )
 
-        remaining_steps = (
-            config.max_iters
-            - step
+        remaining_iterations = (
+            config.max_iters - step
         )
 
-        eta_seconds = (
-            remaining_steps
-            * elapsed
-            / max(step, 1)
+        eta = (
+            average_iteration_time
+            * remaining_iterations
         )
 
-        # ----------------------------------------------------
-        # Progress bar
-        # ----------------------------------------------------
-
-        progress_bar.set_postfix(
+        progress.set_postfix(
             loss=f"{total_loss:.4f}",
-            main=f"{main_loss_total:.4f}",
+            main=f"{main_loss:.4f}",
+            tok_s=f"{tokens_per_second:,.0f}",
             lr=f"{lr:.2e}",
-            tok_s=f"{tokens_per_second:.0f}",
+            eta=format_time(eta),
         )
 
-        # ----------------------------------------------------
-        # Detailed logging
-        # ----------------------------------------------------
-
+        # Detailed periodic logging.
         if step % 10 == 0 or step == 1:
-            log_now = time.perf_counter()
-
-            interval_time = (
-                log_now
-                - previous_log_time
+            log = (
+                f"\n{'=' * 80}\n"
+                f"STEP {step:,}/{config.max_iters:,}\n"
+                f"{'=' * 80}\n"
+                f"Total loss: {total_loss:.6f}\n"
+                f"Main loss:  {main_loss:.6f}\n"
             )
 
-            previous_log_time = log_now
+            if mtp_loss:
+                for name, value in mtp_loss.items():
+                    log += (
+                        f"{name} loss: "
+                        f"{value:.6f}\n"
+                    )
+            else:
+                log += "MTP: DISABLED\n"
 
-            LOGGER.info("")
-            LOGGER.info(
-                "STEP %d / %d",
-                step,
-                config.max_iters,
+            log += (
+                f"Learning rate: {lr:.8e}\n"
+                f"Iteration time: {iteration_time:.4f}s\n"
+                f"Average iteration: "
+                f"{average_iteration_time:.4f}s\n"
+                f"Tokens/sec: {tokens_per_second:,.2f}\n"
+                f"Total tokens: {running_tokens:,}\n"
+                f"Elapsed: {format_time(elapsed)}\n"
+                f"ETA: {format_time(eta)}\n"
             )
 
-            LOGGER.info(
-                "Loss=%.6f | Main loss=%.6f | "
-                "MTP losses=[%s]",
-                total_loss,
-                main_loss_total,
-                format_mtp_losses(
-                    mtp_loss_totals
-                ),
-            )
+            tqdm.write(log)
 
-            LOGGER.info(
-                "Learning rate=%.8e | "
-                "Gradient scale=%.4f",
-                lr,
-                scaler.get_scale(),
-            )
+            print_vram(f"Step {step}")
 
-            LOGGER.info(
-                "Step time=%s | "
-                "Logging interval=%s | "
-                "Elapsed=%s | "
-                "ETA=%s",
-                fmt_time(step_time),
-                fmt_time(interval_time),
-                fmt_time(elapsed),
-                fmt_time(eta_seconds),
-            )
-
-            LOGGER.info(
-                "Tokens/step=%s | "
-                "Step tokens/sec=%.2f | "
-                "Average tokens/sec=%.2f | "
-                "Total processed tokens=%s",
-                f"{tokens_per_step:,}",
-                tokens_per_second,
-                average_tokens_per_second,
-                f"{cumulative_tokens:,}",
-            )
-
-            log_vram(
-                f"Step {step} VRAM",
-                device,
-            )
-
-        # ----------------------------------------------------
+        # ====================================================
         # Evaluation
-        # ----------------------------------------------------
+        # ====================================================
 
         should_evaluate = (
             step % config.eval_interval == 0
@@ -1476,171 +1033,120 @@ def train_model():
         )
 
         if should_evaluate:
-            section(
-                f"EVALUATION AT STEP {step}"
-            )
 
-            eval_start = time.perf_counter()
+            print("\n" + "=" * 80)
+            print(f"EVALUATION AT STEP {step}")
+            print("=" * 80)
+
+            evaluation_start = time.perf_counter()
 
             losses = estimate_loss(
                 model,
                 config,
-                train_data,
-                val_data,
+                train_dataset,
+                val_dataset,
                 device,
-                dtype,
-                amp,
-                eval_rng,
+                autocast,
             )
 
-            eval_time = (
+            evaluation_time = (
                 time.perf_counter()
-                - eval_start
+                - evaluation_start
             )
 
-            LOGGER.info(
-                "Evaluation completed in %s",
-                fmt_time(eval_time),
+            print(
+                f"\nEvaluation completed in "
+                f"{evaluation_time:.3f}s"
             )
 
-            LOGGER.info(
-                "TRAIN | Loss=%.6f | Main=%.6f | MTP=[%s]",
-                losses["train"]["loss"],
-                losses["train"]["main"],
-                format_mtp_losses(
-                    losses["train"]["mtp"]
-                ),
+            print("\nTRAIN")
+            print_loss_summary(losses["train"])
+
+            print("\nVALIDATION")
+            print_loss_summary(losses["val"])
+
+            print_vram(
+                f"After evaluation at step {step}"
             )
 
-            LOGGER.info(
-                "VALIDATION | Loss=%.6f | Main=%.6f | MTP=[%s]",
-                losses["val"]["loss"],
-                losses["val"]["main"],
-                format_mtp_losses(
-                    losses["val"]["mtp"]
-                ),
-            )
+            # Best checkpoint.
+            if losses["val"]["total"] < best_val_loss:
+                best_val_loss = losses["val"]["total"]
 
-            log_vram(
-                "After evaluation",
-                device,
-            )
-
-            # ------------------------------------------------
-            # Random text samples
-            # ------------------------------------------------
-
-            print_random_samples(
-                train_data=train_data,
-                val_data=val_data,
-                tokenizer=tokenizer,
-                sample_count=config.train_samples,
-                max_tokens=config.train_sample_max_tokens,
-                seed=seed + step,
-            )
-
-            # ------------------------------------------------
-            # Save best checkpoint
-            # ------------------------------------------------
-
-            current_val_loss = losses["val"]["loss"]
-
-            if current_val_loss < best_val_loss:
-                best_val_loss = current_val_loss
-
-                checkpoint_path = (
+                best_path = (
                     config.model_save_folder
                     / "best_model.pt"
                 )
 
                 torch.save(
                     raw_model.state_dict(),
-                    checkpoint_path,
+                    best_path,
                 )
 
-                LOGGER.info(
-                    "NEW BEST CHECKPOINT SAVED"
+                print(
+                    f"\n[BEST CHECKPOINT]\n"
+                    f"Path: {best_path.resolve()}\n"
+                    f"Validation loss: "
+                    f"{best_val_loss:.6f}"
                 )
 
-                LOGGER.info(
-                    "Path: %s",
-                    checkpoint_path.resolve(),
-                )
+            # Latest checkpoint.
+            latest_path = (
+                config.model_save_folder
+                / "latest_model.pt"
+            )
 
-                LOGGER.info(
-                    "Best validation loss: %.6f",
-                    best_val_loss,
-                )
+            torch.save(
+                raw_model.state_dict(),
+                latest_path,
+            )
 
-            else:
-                LOGGER.info(
-                    "No improvement. "
-                    "Best validation loss remains %.6f",
-                    best_val_loss,
-                )
+            print(
+                f"\n[LATEST CHECKPOINT]\n"
+                f"Path: {latest_path.resolve()}"
+            )
 
-    # ========================================================
-    # COMPLETION
-    # ========================================================
-
-    section("TRAINING COMPLETE")
+            # Print random train/validation samples.
+            print_samples(
+                train_dataset,
+                val_dataset,
+                tokenizer,
+                config,
+            )
 
     total_training_time = (
         time.perf_counter()
         - training_start
     )
 
-    LOGGER.info(
-        "Total training time: %s",
-        fmt_time(total_training_time),
+    print("\n" + "=" * 80)
+    print("TRAINING COMPLETE")
+    print("=" * 80)
+
+    print(f"Total training time: {format_time(total_training_time)}")
+
+    print(
+        f"Average iteration time: "
+        f"{np.mean(iteration_times):.4f}s"
     )
 
-    LOGGER.info(
-        "Total initialization time: %s",
-        fmt_time(
-            training_start - startup_time
-        ),
+    print(
+        f"Average tokens/sec: "
+        f"{tokens_per_step / np.mean(iteration_times):,.2f}"
     )
 
-    LOGGER.info(
-        "Total elapsed time: %s",
-        fmt_time(
-            time.perf_counter() - startup_time
-        ),
-    )
+    print(f"Total optimizer steps: {config.max_iters:,}")
 
-    LOGGER.info(
-        "Total optimizer steps: %s",
-        f"{config.max_iters:,}",
-    )
+    print(f"Total tokens processed: {running_tokens:,}")
 
-    LOGGER.info(
-        "Total processed tokens: %s",
-        f"{cumulative_tokens:,}",
-    )
+    print(f"Best validation loss: {best_val_loss:.6f}")
 
-    LOGGER.info(
-        "Average training throughput: %.2f tokens/sec",
-        cumulative_tokens
-        / max(total_training_time, 1e-12),
-    )
+    print_vram("Final VRAM")
 
-    LOGGER.info(
-        "Best validation loss: %.6f",
-        best_val_loss,
-    )
-
-    log_vram(
-        "Final VRAM",
-        device,
-    )
+    print("=" * 80)
 
     return model, config
 
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
 
 if __name__ == "__main__":
     train_model()
