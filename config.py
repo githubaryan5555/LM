@@ -46,7 +46,7 @@ class ModelConfig:
     betas: tuple = (0.9, 0.95)
     weight_decay: float = 0.1
     eps: float = 1e-9
-
+    seed: int = 67
     # Re regularization and auxiliary losses
     dropout: float = 0.0
     bias: bool = False
