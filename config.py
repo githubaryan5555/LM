@@ -9,7 +9,7 @@ class ModelConfig:
     # Core architecture
     vocab_size: int = 8192
     block_size: int = 256
-    n_layer: int = 4
+    n_layer: int = 6
     n_embd: int = 512
     n_head: int = 8
 
@@ -19,7 +19,7 @@ class ModelConfig:
     rope_dim: int = 32
 
     # Mixture of experts
-    n_experts: int = 24
+    n_experts: int = 16
     n_experts_per_token: int = 4
     expert_intermediate_size: int = 512
     shared_expert_intermediate_size: int = 512
