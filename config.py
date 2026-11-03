@@ -38,8 +38,8 @@ class ModelConfig:
     min_lr: float = 2e-4
     eval_interval: int = 128
     eval_iters: int = 256
-    batch_size: int = 32
-    gradient_accumulation_steps: int = 64
+    batch_size: int = 16
+    gradient_accumulation_steps: int = 128
     train_samples: int = 8
     train_sample_max_tokens: int = 512
     # Optimizer
