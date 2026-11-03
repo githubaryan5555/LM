@@ -26,7 +26,7 @@ class ModelConfig:
     use_shared_expert: bool = True
 
     # Multi-token prediction
-    mtp_num_heads: int = 0
+    mtp_num_heads: int = 1
 
     # ==================== TRAIN VARIABLES ====================
 
