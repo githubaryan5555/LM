@@ -8,8 +8,8 @@ class ModelConfig:
 
     # Core architecture
     vocab_size: int = 8192
-    block_size: int = 512
-    n_layer: int = 6
+    block_size: int = 256
+    n_layer: int = 4
     n_embd: int = 512
     n_head: int = 8
 
@@ -38,8 +38,8 @@ class ModelConfig:
     min_lr: float = 2e-4
     eval_interval: int = 128
     eval_iters: int = 256
-    batch_size: int = 64
-    gradient_accumulation_steps: int = 32
+    batch_size: int = 32
+    gradient_accumulation_steps: int = 64
     train_samples: int = 8
     train_sample_max_tokens: int = 512
     # Optimizer
