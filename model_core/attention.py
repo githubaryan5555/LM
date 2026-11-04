@@ -19,22 +19,56 @@ class MultiHeadLatentAttention(nn.Module):
         self.q_lora_rank = config.q_lora_rank
         self.rope_dim = config.rope_dim
 
+        self.qk_nope_head_dim = config.qk_nope_head_dim
+        self.qk_rope_head_dim = config.qk_rope_head_dim
+        self.v_head_dim = config.v_head_dim
+
+        self.qk_head_dim = (
+            self.qk_nope_head_dim + self.qk_rope_head_dim
+        )
+
+        
         # KV compression
-        self.kv_proj = nn.Linear(self.n_embd, self.kv_lora_rank, bias=False)
+        self.wkv_a = nn.Linear(
+            self.n_embd,
+            self.kv_lora_rank + self.qk_rope_head_dim,
+            bias=False
+        )
+
         self.kv_norm = RMSNorm(self.kv_lora_rank)
 
-        # KV decompression
-        self.k_decompress = nn.Linear(self.kv_lora_rank, self.n_head * self.head_dim, bias=False)
-        self.v_decompress = nn.Linear(self.kv_lora_rank, self.n_head * self.head_dim, bias=False)
-
+        self.wkv_b = nn.Linear(
+            self.kv_lora_rank,
+            self.n_head * (
+                self.qk_nope_head_dim + self.v_head_dim
+            ),
+            bias=False
+        )
+   
+        
         # Query compression
-        self.q_proj = nn.Linear(self.n_embd, self.q_lora_rank, bias=False)
-        self.q_decompress = nn.Linear(self.q_lora_rank, self.n_head * self.head_dim, bias=False)
+        self.wq_a = nn.Linear(
+            self.n_embd,
+            self.q_lora_rank,
+            bias=False
+        )
 
+        self.q_norm = RMSNorm(self.q_lora_rank)
+
+        self.wq_b = nn.Linear(
+            self.q_lora_rank,
+            self.n_head * self.qk_nope_head_dim,
+            bias=False
+        )
+
+        
         # RoPE projections
-        self.k_rope_proj = nn.Linear(self.n_embd, self.n_head * self.rope_dim, bias=False)
-        self.q_rope_proj = nn.Linear(self.q_lora_rank, self.n_head * self.rope_dim, bias=False)
-
+        self.wq_pe = nn.Linear(
+            self.q_lora_rank,
+            self.n_head * self.qk_rope_head_dim,
+            bias=False
+        )
+        
         # Output projection
         self.o_proj = nn.Linear(self.n_head * self.head_dim, self.n_embd, bias=config.bias)
 
@@ -86,9 +120,10 @@ class MultiHeadLatentAttention(nn.Module):
         k = torch.cat([k_content, k_rope], dim=-1)
 
         # Attention computation
-        scale = 1.0 / math.sqrt(q.size(-1))
-        scores = torch.matmul(q, k.transpose(-2, -1)) * scale
-
+        self.softmax_scale = self.qk_head_dim ** -0.5
+        scores = torch.matmul(q, k.transpose(-2, -1))
+        scores = scores * self.softmax_scale
+        
         # Apply causal mask
         scores = scores.masked_fill(self.causal_mask[:, :, :T, :T] == 0, float('-inf'))
 
