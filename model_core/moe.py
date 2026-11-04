@@ -82,17 +82,13 @@ class MoELayer(nn.Module):
         else:
             self.shared_expert = None
 
-    
-    def forward(self, x, routing=None):
+    def forward(self, x):
         batch_size, seq_len, hidden_size = x.shape
         x_flat = x.reshape(-1, hidden_size)
 
-        if routing is None:
-            routing_weights, top_k_indices = self.router(x_flat)
-        else:
-            routing_weights, top_k_indices = routing
+        routing_weights, top_k_indices = self.router(x_flat)
 
-    # Counts top-k assignments, not unique tokens.
+        # Counts top-k assignments, not unique tokens.
         assignment_counts = torch.bincount(
             top_k_indices.reshape(-1),
             minlength=self.n_experts,
@@ -110,19 +106,18 @@ class MoELayer(nn.Module):
             assignment_mask = top_k_indices == expert_idx
             expert_mask = assignment_mask.any(dim=-1)
 
+            # Each selected expert contributes its routing weight for that token.
             expert_weights = (
                 routing_weights
                 * assignment_mask.to(routing_weights.dtype)
             ).sum(dim=-1)
 
-            if expert_mask.any():
-                expert_input = x_flat[expert_mask]
-                expert_output = expert(expert_input)
+            expert_input = x_flat[expert_mask]
+            expert_output = expert(expert_input)
 
-                output[expert_mask] += (
-                    expert_output
-                    * expert_weights[expert_mask].unsqueeze(-1)
-                )
+            output[expert_mask] += (
+                expert_output * expert_weights[expert_mask].unsqueeze(-1)
+            )
 
         if self.shared_expert is not None:
             output = output + self.shared_expert(x_flat)
