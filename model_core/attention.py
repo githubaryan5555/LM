@@ -12,12 +12,11 @@ class MultiHeadLatentAttention(nn.Module):
         self.config = config
         self.n_embd = config.n_embd
         self.n_head = config.n_head
-        self.head_dim = config.n_embd // config.n_head
-
+        
         # Compression dimensions
         self.kv_lora_rank = config.kv_lora_rank
         self.q_lora_rank = config.q_lora_rank
-        self.rope_dim = config.rope_dim
+        
 
         self.qk_nope_head_dim = config.qk_nope_head_dim
         self.qk_rope_head_dim = config.qk_rope_head_dim
@@ -70,14 +69,18 @@ class MultiHeadLatentAttention(nn.Module):
         )
         
         # Output projection
-        self.o_proj = nn.Linear(self.n_head * self.head_dim, self.n_embd, bias=config.bias)
+        self.o_proj = nn.Linear(
+            self.n_head * self.v_head_dim,
+            self.n_embd,
+            bias=config.bias
+        )
 
         # Dropout
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
 
         # RoPE
-        self.rope = RotaryEmbedding(self.rope_dim, config.block_size)
+        self.rope = RotaryEmbedding(self.qk_rope_head_dim,config.block_size)
 
         # Causal mask
         self.register_buffer(
@@ -87,55 +90,108 @@ class MultiHeadLatentAttention(nn.Module):
             )
         )
 
-    def forward(self, x):
-        B, T, C = x.size()
-
-        # Compression phase
-        kv_compressed = self.kv_norm(self.kv_proj(x))
-        q_compressed = self.q_proj(x)
-
-        # Decompression phase
-        k_content = self.k_decompress(kv_compressed)
-        v = self.v_decompress(kv_compressed)
-        q_content = self.q_decompress(q_compressed)
-
-        # RoPE components
-        k_rope = self.k_rope_proj(x)
-        q_rope = self.q_rope_proj(q_compressed)
-
-        # Reshape for multi-head attention
-        k_content = k_content.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
-        v = v.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
-        q_content = q_content.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
-        k_rope = k_rope.view(B, T, self.n_head, self.rope_dim).transpose(1, 2)
-        q_rope = q_rope.view(B, T, self.n_head, self.rope_dim).transpose(1, 2)
-
-        # Apply RoPE
-        cos, sin = self.rope(x, T)
-        q_rope = apply_rope(q_rope, cos, sin)
-        k_rope = apply_rope(k_rope, cos, sin)
-
-        # Concatenate content and rope parts
-        q = torch.cat([q_content, q_rope], dim=-1)
-        k = torch.cat([k_content, k_rope], dim=-1)
-
-        # Attention computation
-        self.softmax_scale = self.qk_head_dim ** -0.5
-        scores = torch.matmul(q, k.transpose(-2, -1))
-        scores = scores * self.softmax_scale
         
-        # Apply causal mask
-        scores = scores.masked_fill(self.causal_mask[:, :, :T, :T] == 0, float('-inf'))
+        def forward(self, x):
+            B, T, C = x.size()
+  
+    # --------------------------------------------------
+    # KV compression
+    # --------------------------------------------------
 
-        # Softmax and dropout
-        attn_weights = F.softmax(scores, dim=-1)
-        attn_weights = self.attn_dropout(attn_weights)
+            kv_compressed, k_rope = torch.split(
+                self.wkv_a(x),
+                [self.kv_lora_rank, self.qk_rope_head_dim],
+                dim=-1
+            )
 
-        # Apply attention to values
-        out = torch.matmul(attn_weights, v)
+            kv_compressed = self.kv_norm(kv_compressed)
 
-        # Reshape and project
-        out = out.transpose(1, 2).contiguous().view(B, T, self.n_head * self.head_dim)
-        out = self.resid_dropout(self.o_proj(out))
+    # --------------------------------------------------
+    # Query compression
+    # --------------------------------------------------
 
+            q_compressed = self.q_norm(self.wq_a(x))
+
+    # --------------------------------------------------
+    # Query decompression
+    # --------------------------------------------------
+
+            q_nope = self.wq_b(q_compressed).view(
+                B, T, self.n_head, self.qk_nope_head_dim
+            ).transpose(1, 2)
+
+            q_rope = self.wq_pe(q_compressed).view(
+                B, T, self.n_head, self.qk_rope_head_dim
+            ).transpose(1, 2)
+
+    # --------------------------------------------------
+    # KV decompression
+    # --------------------------------------------------
+
+            kv = self.wkv_b(kv_compressed).view(
+                B, T, self.n_head,
+                self.qk_nope_head_dim + self.v_head_dim
+            )
+
+            k_nope, v = torch.split(
+                kv,
+               [self.qk_nope_head_dim, self.v_head_dim],
+                dim=-1
+            )
+
+            k_nope = k_nope.transpose(1, 2)
+            v = v.transpose(1, 2)
+
+    # --------------------------------------------------
+    # Positional key
+    # --------------------------------------------------
+
+            k_rope = k_rope.unsqueeze(2).expand(
+                B, T, self.n_head, self.qk_rope_head_dim
+            ).transpose(1, 2)
+
+    # --------------------------------------------------
+    # RoPE
+    # --------------------------------------------------
+
+            cos, sin = self.rope(x, T)
+
+            q_rope = apply_rope(q_rope, cos, sin)
+            k_rope = apply_rope(k_rope, cos, sin)
+
+    # --------------------------------------------------
+    # Attention
+    # --------------------------------------------------
+
+            q = torch.cat([q_nope, q_rope], dim=-1)
+            k = torch.cat([k_nope, k_rope], dim=-1)
+  
+            scores = torch.matmul(
+                q, k.transpose(-2, -1)
+            ) * self.softmax_scale
+
+            scores = scores.masked_fill(
+                self.causal_mask[:, :, :T, :T] == 0,
+                float('-inf')
+            )
+
+            attn_weights = F.softmax(scores, dim=-1)
+            attn_weights = self.attn_dropout(attn_weights)
+
+            out = torch.matmul(attn_weights, v)
+
+    # --------------------------------------------------
+    # Output projection
+    # --------------------------------------------------
+
+                out = out.transpose(1, 2).contiguous().view(
+                B, T, self.n_head * self.v_head_dim
+            )
+
+            out = self.resid_dropout(self.o_proj(out))
+
+         
         return out
+
+    
+        
