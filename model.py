@@ -16,40 +16,71 @@ class ExpertPredictor(nn.Module):
         Predict the next MoE layer's selected experts.
 
     Inputs:
-        Features containing previous router selections and layer position.
+        Previous layer hidden states.
+        Previous layer's full router probabilities.
+        Previous layer's selected experts.
+        Layer transition information.
 
     Outputs:
-        One prediction score per expert.
+        One prediction logit per expert.
     """
 
-    def __init__(self, n_experts, n_layers):
+    def __init__(self, config):
         super().__init__()
 
-        input_size = n_experts + (n_layers - 1)
-        hidden_size = max(32, n_experts * 2)
+        self.n_experts = config.n_experts
+        self.n_layers = config.n_layer
+        self.n_embd = config.n_embd
+
+        input_size = (
+            self.n_embd
+            + self.n_experts
+            + self.n_experts
+            + self.n_layers - 1
+        )
+
+        hidden_size = max(64, min(256, self.n_embd // 2))
+
+        self.hidden_norm = nn.LayerNorm(self.n_embd)
 
         self.network = nn.Sequential(
             nn.Linear(input_size, hidden_size),
             nn.GELU(),
-            nn.Linear(hidden_size, n_experts),
+            nn.Linear(hidden_size, self.n_experts),
         )
 
-    def forward(self, x):
-        return self.network(x)
+    def forward(
+        self,
+        hidden_states,
+        router_probabilities,
+        selected_experts,
+        transition_features,
+    ):
+
+        hidden_states = self.hidden_norm(hidden_states)
+
+        features = torch.cat(
+            [
+                hidden_states,
+                router_probabilities,
+                selected_experts,
+                transition_features,
+            ],
+            dim=-1,
+        )
+
+        return self.network(features)
 
 
 class ModelBlock(nn.Module):
     """
     Purpose:
-        Execute one MLA + MoE transformer block and expose
-        the actual router selections for predictor training.
-
-    Inputs:
-        x: Hidden states (batch, sequence, embedding).
+        Execute MLA and MoE and return actual routing information.
 
     Outputs:
-        x: Updated hidden states.
-        router_indices: Actual selected expert indices.
+        Updated hidden states.
+        Selected expert indices.
+        Full router probabilities.
     """
 
     def __init__(self, config):
@@ -62,36 +93,53 @@ class ModelBlock(nn.Module):
         self.mlp = MoELayer(config)
 
     def forward(self, x):
+
         x = x + self.attn(self.ln_1(x))
 
         normalized = self.ln_2(x)
 
-        # Capture the actual router selections.
-        # MoELayer performs the same routing again during execution.
-        # Its load-balancing bias is updated only after that routing.
-        with torch.no_grad():
-            _, router_indices = self.mlp.router(
-                normalized.reshape(-1, normalized.size(-1))
-            )
+        batch_size, seq_len, hidden_size = normalized.shape
 
-        x = x + self.mlp(normalized)
+        flat = normalized.reshape(-1, hidden_size)
 
-        return x, router_indices
+        # Calculate router logits exactly once.
+        router_logits = (
+            self.mlp.router.proj(flat)
+            + self.mlp.router.expert_bias
+        )
+
+        # Full probability distribution over all experts.
+        router_probabilities = F.softmax(
+            router_logits,
+            dim=-1,
+        )
+
+        # Actual top-k routing.
+        top_k_logits, router_indices = torch.topk(
+            router_logits,
+            self.mlp.top_k,
+            dim=-1,
+        )
+
+        routing_weights = F.softmax(
+            top_k_logits,
+            dim=-1,
+        )
+
+        # Pass the exact same routing decision to MoE.
+        x = x + self.mlp(
+            normalized,
+            routing=(routing_weights, router_indices),
+        )
+
+        return (
+            x,
+            router_indices,
+            router_probabilities.detach(),
+        )
 
 
 class Model(nn.Module):
-    """
-    Purpose:
-        Language model with MLA, MoE, MTP and an experimental
-        next-layer expert predictor.
-
-    Inputs:
-        idx: Input token IDs.
-        targets: Optional next-token targets.
-
-    Outputs:
-        Main logits, total loss, main loss and MTP loss.
-    """
 
     def __init__(self, config):
         super().__init__()
@@ -99,8 +147,16 @@ class Model(nn.Module):
         self.config = config
 
         # Token and position embeddings
-        self.wte = nn.Embedding(config.vocab_size, config.n_embd)
-        self.wpe = nn.Embedding(config.block_size, config.n_embd)
+        self.wte = nn.Embedding(
+            config.vocab_size,
+            config.n_embd,
+        )
+
+        self.wpe = nn.Embedding(
+            config.block_size,
+            config.n_embd,
+        )
+
         self.drop = nn.Dropout(config.dropout)
 
         # Transformer blocks
@@ -109,7 +165,7 @@ class Model(nn.Module):
             for _ in range(config.n_layer)
         ])
 
-        # Final layer norm
+        # Final norm
         self.ln_f = RMSNorm(config.n_embd)
 
         # Language modeling head
@@ -122,7 +178,7 @@ class Model(nn.Module):
         # Weight tying
         self.wte.weight = self.lm_head.weight
 
-        # Multi-Token Prediction heads
+        # MTP heads
         if config.mtp_num_heads > 0:
             self.mtp_heads = nn.ModuleList([
                 MultiTokenPredictionHead(config, depth)
@@ -131,19 +187,14 @@ class Model(nn.Module):
         else:
             self.mtp_heads = None
 
-        # -------------------------------------------------
-        # Experimental expert predictor
-        # -------------------------------------------------
-
+        # Expert predictor
         if config.n_layer > 1:
-            self.expert_predictor = ExpertPredictor(
-                config.n_experts,
-                config.n_layer,
-            )
+            self.expert_predictor = ExpertPredictor(config)
         else:
             self.expert_predictor = None
 
-        self.predictor_loss_weight = 1.0
+        # Predictor debugging
+        self.predictor_loss_weight = 0.1
         self.predictor_print_interval = 100
         self.predictor_steps = 0
 
@@ -152,7 +203,10 @@ class Model(nn.Module):
 
         # Special initialization for residual projections
         for pn, p in self.named_parameters():
-            if pn.endswith("o_proj.weight") or pn.endswith("down_proj.weight"):
+            if (
+                pn.endswith("o_proj.weight")
+                or pn.endswith("down_proj.weight")
+            ):
                 nn.init.normal_(
                     p,
                     mean=0.0,
@@ -160,18 +214,28 @@ class Model(nn.Module):
                 )
 
     def _init_weights(self, module):
+
         if isinstance(module, nn.Linear):
-            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            nn.init.normal_(
+                module.weight,
+                mean=0.0,
+                std=0.02,
+            )
 
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
 
         elif isinstance(module, nn.Embedding):
-            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            nn.init.normal_(
+                module.weight,
+                mean=0.0,
+                std=0.02,
+            )
 
     def forward(self, idx, targets=None):
 
         device = idx.device
+
         batch_size, seq_len = idx.size()
 
         assert seq_len <= self.config.block_size
@@ -189,78 +253,95 @@ class Model(nn.Module):
 
         x = self.drop(tok_emb + pos_emb)
 
-        # -------------------------------------------------
-        # Transformer blocks + expert prediction training
-        # -------------------------------------------------
-
+        # Predictor statistics
         predictor_losses = []
         predictor_overlaps = []
         predictor_exact_matches = []
 
-        previous_router_indices = None
+        previous_hidden = None
+        previous_probabilities = None
+        previous_selected = None
 
+        # Transformer blocks
         for layer_index, block in enumerate(self.h):
 
-            x, current_router_indices = block(x)
+            x, current_indices, current_probabilities = block(x)
 
-            # Train the predictor only during normal training.
+            # Train predictor using previous layer information.
             if (
                 self.training
                 and targets is not None
-                and previous_router_indices is not None
                 and self.expert_predictor is not None
+                and previous_hidden is not None
             ):
 
-                # Convert previous router selections to multi-hot vectors.
-                previous_targets = F.one_hot(
-                    previous_router_indices,
-                    num_classes=self.config.n_experts,
-                ).sum(dim=1).clamp(max=1).float()
+                number_of_tokens = current_indices.size(0)
 
-                # Actual selections from the current layer.
+                # Previous layer selected experts.
+                previous_selected_features = F.one_hot(
+                    previous_selected,
+                    num_classes=self.config.n_experts,
+                ).sum(dim=-1).clamp(max=1).float()
+
+                # Actual current layer selected experts.
                 actual_targets = F.one_hot(
-                    current_router_indices,
+                    current_indices,
                     num_classes=self.config.n_experts,
-                ).sum(dim=1).clamp(max=1).float()
+                ).sum(dim=-1).clamp(max=1).float()
 
-                number_of_tokens = previous_targets.size(0)
-
-                # Identify which layer transition is being predicted.
-                transition_ids = torch.full(
-                    (number_of_tokens,),
-                    layer_index - 1,
-                    dtype=torch.long,
-                    device=device,
-                )
-
+                # Transition identity.
                 transition_features = F.one_hot(
-                    transition_ids,
+                    torch.full(
+                        (number_of_tokens,),
+                        layer_index - 1,
+                        dtype=torch.long,
+                        device=device,
+                    ),
                     num_classes=self.config.n_layer - 1,
-                ).to(previous_targets.dtype)
+                ).float()
 
                 # Predictor input.
-                predictor_input = torch.cat(
-                    [
-                        previous_targets.detach(),
-                        transition_features,
-                    ],
-                    dim=-1,
+                predictor_input_hidden = (
+                    previous_hidden.detach()
+                    .reshape(-1, self.config.n_embd)
+                    .float()
                 )
 
-                # Predict the next layer's expert scores.
+                predictor_input_probabilities = (
+                    previous_probabilities.detach().float()
+                )
+
+                predictor_input_selected = (
+                    previous_selected_features.detach()
+                )
+
+                # Predict next layer.
                 prediction_logits = self.expert_predictor(
-                    predictor_input
+                    predictor_input_hidden,
+                    predictor_input_probabilities,
+                    predictor_input_selected,
+                    transition_features,
                 )
 
-                # Multi-label training objective.
+                # Account for the smaller number of positive labels.
+                positive_weight = torch.tensor(
+                    (
+                        self.config.n_experts
+                        - self.config.n_experts_per_token
+                    ) / self.config.n_experts_per_token,
+                    device=device,
+                    dtype=prediction_logits.dtype,
+                )
+
                 predictor_loss = F.binary_cross_entropy_with_logits(
                     prediction_logits,
                     actual_targets,
+                    pos_weight=positive_weight,
                 )
 
                 predictor_losses.append(predictor_loss)
 
-                # Select the predicted top-k experts.
+                # Predicted top-k experts.
                 predicted_indices = torch.topk(
                     prediction_logits,
                     self.config.n_experts_per_token,
@@ -270,28 +351,37 @@ class Model(nn.Module):
                 predicted_targets = F.one_hot(
                     predicted_indices,
                     num_classes=self.config.n_experts,
-                ).sum(dim=1).float()
+                ).sum(dim=-1).float()
 
-                # Fraction of actual experts correctly predicted.
+                # Top-k overlap.
                 overlap = (
-                    (predicted_targets * actual_targets).sum(dim=-1)
-                    / self.config.n_experts_per_token
-                ).mean()
+                    (predicted_targets * actual_targets)
+                    .sum(dim=-1)
+                    .div(self.config.n_experts_per_token)
+                    .mean()
+                )
 
-                # Fraction of tokens with all experts correctly predicted.
+                # Exact match.
                 exact_match = (
-                    predicted_targets == actual_targets
-                ).all(dim=-1).float().mean()
+                    (predicted_targets == actual_targets)
+                    .all(dim=-1)
+                    .float()
+                    .mean()
+                )
 
                 predictor_overlaps.append(overlap)
                 predictor_exact_matches.append(exact_match)
 
-            previous_router_indices = current_router_indices.detach()
+            # Save current layer information for next transition.
+            previous_hidden = x.detach()
 
-        # -------------------------------------------------
-        # Final normalization
-        # -------------------------------------------------
+            previous_probabilities = (
+                current_probabilities.detach()
+            )
 
+            previous_selected = current_indices.detach()
+
+        # Final norm
         x = self.ln_f(x)
 
         # Main language modeling head
@@ -300,16 +390,14 @@ class Model(nn.Module):
         main_loss = None
 
         if targets is not None:
+
             main_loss = F.cross_entropy(
-                main_logits.view(-1, main_logits.size(-1)),
-                targets.view(-1),
+                main_logits.reshape(-1, main_logits.size(-1)),
+                targets.reshape(-1),
                 ignore_index=-1,
             )
 
-        # -------------------------------------------------
-        # Multi-Token Prediction
-        # -------------------------------------------------
-
+        # MTP
         mtp_loss = None
 
         if self.mtp_heads is not None and targets is not None:
@@ -317,17 +405,22 @@ class Model(nn.Module):
             mtp_losses = []
             current_hidden = x
 
-            for depth, mtp_head in enumerate(self.mtp_heads, 1):
+            for depth, mtp_head in enumerate(
+                self.mtp_heads,
+                1,
+            ):
 
                 if seq_len > depth:
 
                     future_indices = idx[:, depth:]
+
                     future_embeds = self.wte(future_indices)
 
                     if future_embeds.size(1) < current_hidden.size(1):
 
                         pad_size = (
-                            current_hidden.size(1) - future_embeds.size(1)
+                            current_hidden.size(1)
+                            - future_embeds.size(1)
                         )
 
                         padding = torch.zeros(
@@ -369,11 +462,11 @@ class Model(nn.Module):
                         if shift_labels.numel() > 0:
 
                             mtp_loss_single = F.cross_entropy(
-                                shift_logits.view(
+                                shift_logits.reshape(
                                     -1,
                                     shift_logits.size(-1),
                                 ),
-                                shift_labels.view(-1),
+                                shift_labels.reshape(-1),
                                 ignore_index=-1,
                             )
 
@@ -382,10 +475,7 @@ class Model(nn.Module):
             if mtp_losses:
                 mtp_loss = torch.stack(mtp_losses).mean()
 
-        # -------------------------------------------------
-        # Predictor loss and debugging statistics
-        # -------------------------------------------------
-
+        # Predictor loss and debugging
         predictor_loss = None
 
         if predictor_losses:
@@ -404,18 +494,14 @@ class Model(nn.Module):
 
             self.predictor_steps += 1
 
-            # Print every 100 training forward passes.
             if (
-                self.predictor_steps % self.predictor_print_interval == 0
+                self.predictor_steps
+                % self.predictor_print_interval == 0
             ):
 
-                print(
-                    "\n"
-                    + "=" * 65
-                    + "\nEXPERT PREDICTOR DEBUG"
-                    + "\n"
-                    + "=" * 65
-                )
+                print("\n" + "=" * 65)
+                print("EXPERT PREDICTOR DEBUG")
+                print("=" * 65)
 
                 print(
                     f"Training steps:       {self.predictor_steps}"
@@ -439,10 +525,7 @@ class Model(nn.Module):
 
                 print("=" * 65 + "\n")
 
-        # -------------------------------------------------
         # Combine losses
-        # -------------------------------------------------
-
         if targets is not None:
 
             total_loss = main_loss
@@ -453,18 +536,20 @@ class Model(nn.Module):
                     + self.config.mtp_loss_weight * mtp_loss
                 )
 
-            # Predictor gradients only affect its own parameters.
             if predictor_loss is not None:
                 total_loss = (
                     total_loss
                     + self.predictor_loss_weight * predictor_loss
                 )
 
-            return main_logits, total_loss, main_loss, mtp_loss
+            return (
+                main_logits,
+                total_loss,
+                main_loss,
+                mtp_loss,
+            )
 
-        else:
-
-            return main_logits[:, [-1], :], None, None, None
+        return main_logits[:, [-1], :], None, None, None
 
     @torch.no_grad()
     def generate(
