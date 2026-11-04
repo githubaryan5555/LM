@@ -20,20 +20,15 @@ class ModelConfig:
     kv_lora_rank: int = 64
     q_lora_rank: int = 128
 
-    qk_nope_head_dim: int = 64
-    qk_rope_head_dim: int = 32
-    v_head_dim: int = 64
-    
-
     # Mixture of experts
-    n_experts: int = 16
-    n_experts_per_token: int = 4
+    n_experts: int = 64
+    n_experts_per_token: int = 8
     expert_intermediate_size: int = 512
     shared_expert_intermediate_size: int = 512
     use_shared_expert: bool = True
 
     # Multi-token prediction
-    mtp_num_heads: int = 1
+    mtp_num_heads: int = 0
 
     # ==================== TRAIN VARIABLES ====================
 
