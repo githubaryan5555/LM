@@ -6,6 +6,8 @@ class ModelConfig:
 
     # ==================== MODEL VARIABLES ====================
 
+    rope_dim: int = 64
+    
     # Core architecture
     vocab_size: int = 8192
     block_size: int = 256
