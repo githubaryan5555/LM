@@ -33,7 +33,6 @@ class Router(nn.Module):
 
     @torch.no_grad()
     def update_load_balance(self, assignment_counts, total_assignments):
-        # Rates are based on top-k assignments, not unique tokens.
         rates = assignment_counts.to(self.expert_usage_ema.dtype) / total_assignments
         self.expert_usage_ema.mul_(self.usage_ema_decay).add_(
             rates,
@@ -89,7 +88,7 @@ class MoELayer(nn.Module):
 
         routing_weights, top_k_indices = self.router(x_flat)
 
-        # Count routing assignments: the counts sum to tokens * top_k.
+        # Counts top-k assignments, not unique tokens.
         assignment_counts = torch.bincount(
             top_k_indices.reshape(-1),
             minlength=self.n_experts,
@@ -104,18 +103,20 @@ class MoELayer(nn.Module):
         output = torch.zeros_like(x_flat)
 
         for expert_idx, expert in enumerate(self.experts):
-            token_indices, top_k_slots = torch.where(
-                top_k_indices == expert_idx
-            )
+            assignment_mask = top_k_indices == expert_idx
+            expert_mask = assignment_mask.any(dim=-1)
 
-            expert_input = x_flat[token_indices]
+            # Each selected expert contributes its routing weight for that token.
+            expert_weights = (
+                routing_weights
+                * assignment_mask.to(routing_weights.dtype)
+            ).sum(dim=-1)
+
+            expert_input = x_flat[expert_mask]
             expert_output = expert(expert_input)
-            weights = routing_weights[token_indices, top_k_slots].unsqueeze(-1)
 
-            output.index_add_(
-                0,
-                token_indices,
-                expert_output * weights,
+            output[expert_mask] += (
+                expert_output * expert_weights[expert_mask].unsqueeze(-1)
             )
 
         if self.shared_expert is not None:
