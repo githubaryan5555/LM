@@ -1,4 +1,4 @@
-import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -6,18 +6,20 @@ import torch.nn.functional as F
 from .rmsnorm import RMSNorm
 from .rope import RotaryEmbedding, apply_rope
 
+
 class MultiHeadLatentAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
+
         self.config = config
         self.n_embd = config.n_embd
         self.n_head = config.n_head
-        
+
         # Compression dimensions
         self.kv_lora_rank = config.kv_lora_rank
         self.q_lora_rank = config.q_lora_rank
-        
 
+        # Attention dimensions
         self.qk_nope_head_dim = config.qk_nope_head_dim
         self.qk_rope_head_dim = config.qk_rope_head_dim
         self.v_head_dim = config.v_head_dim
@@ -26,7 +28,6 @@ class MultiHeadLatentAttention(nn.Module):
             self.qk_nope_head_dim + self.qk_rope_head_dim
         )
 
-        
         # KV compression
         self.wkv_a = nn.Linear(
             self.n_embd,
@@ -36,6 +37,7 @@ class MultiHeadLatentAttention(nn.Module):
 
         self.kv_norm = RMSNorm(self.kv_lora_rank)
 
+        # KV decompression
         self.wkv_b = nn.Linear(
             self.kv_lora_rank,
             self.n_head * (
@@ -43,8 +45,7 @@ class MultiHeadLatentAttention(nn.Module):
             ),
             bias=False
         )
-   
-        
+
         # Query compression
         self.wq_a = nn.Linear(
             self.n_embd,
@@ -54,20 +55,20 @@ class MultiHeadLatentAttention(nn.Module):
 
         self.q_norm = RMSNorm(self.q_lora_rank)
 
+        # Query decompression
         self.wq_b = nn.Linear(
             self.q_lora_rank,
             self.n_head * self.qk_nope_head_dim,
             bias=False
         )
 
-        
-        # RoPE projections
+        # Query positional projection
         self.wq_pe = nn.Linear(
             self.q_lora_rank,
             self.n_head * self.qk_rope_head_dim,
             bias=False
         )
-        
+
         # Output projection
         self.o_proj = nn.Linear(
             self.n_head * self.v_head_dim,
@@ -80,120 +81,95 @@ class MultiHeadLatentAttention(nn.Module):
         self.resid_dropout = nn.Dropout(config.dropout)
 
         # RoPE
-        self.rope = RotaryEmbedding(self.qk_rope_head_dim,config.block_size)
+        self.rope = RotaryEmbedding(
+            self.qk_rope_head_dim,
+            config.block_size
+        )
 
         # Causal mask
         self.register_buffer(
             "causal_mask",
-            torch.tril(torch.ones(config.block_size, config.block_size)).view(
-                1, 1, config.block_size, config.block_size
-            )
+            torch.tril(
+                torch.ones(config.block_size, config.block_size)
+            ).view(1, 1, config.block_size, config.block_size)
         )
 
+        # Attention scaling
         self.softmax_scale = self.qk_head_dim ** -0.5
 
-        
-        def forward(self, x):
-            B, T, C = x.size()
-  
-    # --------------------------------------------------
-    # KV compression
-    # --------------------------------------------------
+    def forward(self, x):
+        B, T, C = x.size()
 
-            kv_compressed, k_rope = torch.split(
-                self.wkv_a(x),
-                [self.kv_lora_rank, self.qk_rope_head_dim],
-                dim=-1
-            )
+        # KV compression
+        kv_compressed, k_rope = torch.split(
+            self.wkv_a(x),
+            [self.kv_lora_rank, self.qk_rope_head_dim],
+            dim=-1
+        )
 
-            kv_compressed = self.kv_norm(kv_compressed)
+        kv_compressed = self.kv_norm(kv_compressed)
 
-    # --------------------------------------------------
-    # Query compression
-    # --------------------------------------------------
+        # Query compression
+        q_compressed = self.q_norm(self.wq_a(x))
 
-            q_compressed = self.q_norm(self.wq_a(x))
+        # Query decompression
+        q_nope = self.wq_b(q_compressed).view(
+            B, T, self.n_head, self.qk_nope_head_dim
+        ).transpose(1, 2)
 
-    # --------------------------------------------------
-    # Query decompression
-    # --------------------------------------------------
+        q_rope = self.wq_pe(q_compressed).view(
+            B, T, self.n_head, self.qk_rope_head_dim
+        ).transpose(1, 2)
 
-            q_nope = self.wq_b(q_compressed).view(
-                B, T, self.n_head, self.qk_nope_head_dim
-            ).transpose(1, 2)
+        # KV decompression
+        kv = self.wkv_b(kv_compressed).view(
+            B, T, self.n_head,
+            self.qk_nope_head_dim + self.v_head_dim
+        )
 
-            q_rope = self.wq_pe(q_compressed).view(
-                B, T, self.n_head, self.qk_rope_head_dim
-            ).transpose(1, 2)
+        k_nope, v = torch.split(
+            kv,
+            [self.qk_nope_head_dim, self.v_head_dim],
+            dim=-1
+        )
 
-    # --------------------------------------------------
-    # KV decompression
-    # --------------------------------------------------
+        k_nope = k_nope.transpose(1, 2)
+        v = v.transpose(1, 2)
 
-            kv = self.wkv_b(kv_compressed).view(
-                B, T, self.n_head,
-                self.qk_nope_head_dim + self.v_head_dim
-            )
+        # Positional key shared across heads
+        k_rope = k_rope.unsqueeze(2).expand(
+            B, T, self.n_head, self.qk_rope_head_dim
+        ).transpose(1, 2)
 
-            k_nope, v = torch.split(
-                kv,
-               [self.qk_nope_head_dim, self.v_head_dim],
-                dim=-1
-            )
+        # Apply RoPE
+        cos, sin = self.rope(x, T)
 
-            k_nope = k_nope.transpose(1, 2)
-            v = v.transpose(1, 2)
+        q_rope = apply_rope(q_rope, cos, sin)
+        k_rope = apply_rope(k_rope, cos, sin)
 
-    # --------------------------------------------------
-    # Positional key
-    # --------------------------------------------------
+        # Attention
+        q = torch.cat([q_nope, q_rope], dim=-1)
+        k = torch.cat([k_nope, k_rope], dim=-1)
 
-            k_rope = k_rope.unsqueeze(2).expand(
-                B, T, self.n_head, self.qk_rope_head_dim
-            ).transpose(1, 2)
+        scores = torch.matmul(
+            q, k.transpose(-2, -1)
+        ) * self.softmax_scale
 
-    # --------------------------------------------------
-    # RoPE
-    # --------------------------------------------------
+        scores = scores.masked_fill(
+            self.causal_mask[:, :, :T, :T] == 0,
+            float('-inf')
+        )
 
-            cos, sin = self.rope(x, T)
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.attn_dropout(attn_weights)
 
-            q_rope = apply_rope(q_rope, cos, sin)
-            k_rope = apply_rope(k_rope, cos, sin)
+        out = torch.matmul(attn_weights, v)
 
-    # --------------------------------------------------
-    # Attention
-    # --------------------------------------------------
+        # Output projection
+        out = out.transpose(1, 2).contiguous().view(
+            B, T, self.n_head * self.v_head_dim
+        )
 
-            q = torch.cat([q_nope, q_rope], dim=-1)
-            k = torch.cat([k_nope, k_rope], dim=-1)
-  
-            scores = torch.matmul(
-                q, k.transpose(-2, -1)
-            ) * self.softmax_scale
+        out = self.resid_dropout(self.o_proj(out))
 
-            scores = scores.masked_fill(
-                self.causal_mask[:, :, :T, :T] == 0,
-                float('-inf')
-            )
-
-            attn_weights = F.softmax(scores, dim=-1)
-            attn_weights = self.attn_dropout(attn_weights)
-
-            out = torch.matmul(attn_weights, v)
-
-    # --------------------------------------------------
-    # Output projection
-    # --------------------------------------------------
-
-                out = out.transpose(1, 2).contiguous().view(
-                B, T, self.n_head * self.v_head_dim
-            )
-
-            out = self.resid_dropout(self.o_proj(out))
-
-         
         return out
-
-    
-        
