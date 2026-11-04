@@ -90,6 +90,8 @@ class MultiHeadLatentAttention(nn.Module):
             )
         )
 
+        self.softmax_scale = self.qk_head_dim ** -0.5
+
         
         def forward(self, x):
             B, T, C = x.size()
