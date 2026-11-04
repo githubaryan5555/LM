@@ -23,7 +23,7 @@ class ModelConfig:
     # Mixture of experts
     n_experts: int = 128
     n_experts_per_token: int = 4
-    expert_intermediate_size: int = 512
+    expert_intermediate_size: int = 16
     shared_expert_intermediate_size: int = 512
     use_shared_expert: bool = True
 
