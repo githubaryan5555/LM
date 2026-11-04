@@ -17,6 +17,11 @@ class ModelConfig:
     kv_lora_rank: int = 64
     q_lora_rank: int = 128
     rope_dim: int = 32
+   
+    qk_nope_head_dim = 64
+    qk_rope_head_dim = 32
+    v_head_dim = 64
+    
 
     # Mixture of experts
     n_experts: int = 16
