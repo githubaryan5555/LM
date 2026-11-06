@@ -11,7 +11,7 @@ class ModelConfig:
     # Core architecture
     vocab_size: int = 8192
     block_size: int = 256
-    n_layer: int = 8
+    n_layer: int = 6
     n_embd: int = 512
     n_head: int = 8
 
@@ -21,7 +21,7 @@ class ModelConfig:
     q_lora_rank: int = 128
 
     # Mixture of experts
-    n_experts: int = 64
+    n_experts: int = 32 
     n_experts_per_token: int = 2
     expert_intermediate_size: int = 256
     shared_expert_intermediate_size: int = 512
