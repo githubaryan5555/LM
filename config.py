@@ -35,7 +35,7 @@ class ModelConfig:
     # Training schedule
     compile: bool = True
     learning_rate: float = 8e-4
-    max_iters: int = 1024
+    max_iters: int = 5000
     warmup_steps: int = 64
     min_lr: float = 2e-4
     eval_interval: int = 128
