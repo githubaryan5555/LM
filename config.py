@@ -41,7 +41,7 @@ class ModelConfig:
     eval_interval: int = 128
     eval_iters: int = 256
     batch_size: int = 128
-    gradient_accumulation_steps: int = 16
+    gradient_accumulation_steps: int = 1
     train_samples: int = 8
     train_sample_max_tokens: int = 512
     # Optimizer
