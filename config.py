@@ -21,9 +21,9 @@ class ModelConfig:
     q_lora_rank: int = 128
 
     # Mixture of experts
-    n_experts: int = 32 
+    n_experts: int = 16
     n_experts_per_token: int = 2
-    expert_intermediate_size: int = 256
+    expert_intermediate_size: int = 512
     shared_expert_intermediate_size: int = 512
     use_shared_expert: bool = True
 
