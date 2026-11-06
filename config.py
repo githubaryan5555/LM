@@ -36,12 +36,12 @@ class ModelConfig:
     compile: bool = True
     learning_rate: float = 8e-4
     max_iters: int = 5000
-    warmup_steps: int = 64
+    warmup_steps: int = 500
     min_lr: float = 2e-4
     eval_interval: int = 128
     eval_iters: int = 256
-    batch_size: int = 64
-    gradient_accumulation_steps: int = 32
+    batch_size: int = 128
+    gradient_accumulation_steps: int = 16
     train_samples: int = 8
     train_sample_max_tokens: int = 512
     # Optimizer
