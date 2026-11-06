@@ -28,7 +28,7 @@ class Router(nn.Module):
     def forward(self, x):
         logits = self.proj(x) + self.expert_bias
         top_k_logits, indices = torch.topk(logits, self.top_k, dim=-1)
-        weights = F.softmax(top_k_logits, dim=-1)
+        weights = torch.sigmoid(top_k_logits)
         return weights, indices
 
     @torch.no_grad()
