@@ -5,7 +5,7 @@ from pathlib import Path
 class ModelConfig:
 
     # ==================== MODEL VARIABLES ====================
-
+    n_kv_head: int = 2 #temp
     rope_dim: int = 64
     
     # Core architecture
