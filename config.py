@@ -4,8 +4,7 @@ from pathlib import Path
 @dataclass
 class ModelConfig:
 
-    # ==================== MODEL VARIABLES ====================
-    n_kv_head: int = 2 #temp
+    # ==================== MODEL VARIABLES ===================
     rope_dim: int = 64
     
     # Core architecture
