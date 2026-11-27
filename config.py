@@ -32,7 +32,7 @@ class ModelConfig:
     # ==================== TRAIN VARIABLES ====================
 
     # Training schedule
-    compile: bool = True
+    compile: bool = False
     learning_rate: float = 8e-4
     max_iters: int = 5000
     warmup_steps: int = 500
@@ -54,7 +54,7 @@ class ModelConfig:
     aux_loss_weight: float = 0.001
     mtp_loss_weight: float = 0.25
     device: str = "cuda"
-    dtype: str = "float16"
+    dtype: str = "bfloat16"
     # ==================== GENERATION VARIABLES ====================
 
     # Text generation settings
