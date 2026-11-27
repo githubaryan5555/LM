@@ -45,10 +45,10 @@ class ModelConfig:
     gradient_accumulation_steps: int = 32
     
     train_samples: int = 16
-    train_sample_max_tokens: int = 1024
+    train_sample_max_tokens: int = 64
     temperature: float = 0.8
     top_k: int = 64
-    sample_size: int = 16
+    sample_size: int = 128
     # text generarion test every eval. 16 tokens of random samples taken 1:1 ratio from train and val bns
   
     # Optimizer
