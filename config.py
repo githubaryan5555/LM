@@ -53,7 +53,7 @@ class ModelConfig:
     bias: bool = False
     aux_loss_weight: float = 0.001
     mtp_loss_weight: float = 0.25
-    device: str = "cuda"
+    device: str = "xla"
     dtype: str = "bfloat16"
     # ==================== GENERATION VARIABLES ====================
 
