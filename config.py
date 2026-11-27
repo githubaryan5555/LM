@@ -32,17 +32,25 @@ class ModelConfig:
     # ==================== TRAIN VARIABLES ====================
 
     # Training schedule
+    print_every: int = 16
     compile: bool = True
     learning_rate: float = 8e-4
     max_iters: int = 5000
     warmup_steps: int = 500
     min_lr: float = 2e-4
-    eval_interval: int = 128
+    eval_interval: int = 64
     eval_iters: int = 256
+    
     batch_size: int = 128
     gradient_accumulation_steps: int = 32
-    train_samples: int = 8
-    train_sample_max_tokens: int = 512
+    
+    train_samples: int = 16
+    train_sample_max_tokens: int = 1024
+    temperature: float = 0.8
+    top_k: int = 64
+    sample_size: int = 16
+    # text generarion test every eval. 16 tokens of random samples taken 1:1 ratio from train and val bns
+  
     # Optimizer
     betas: tuple = (0.9, 0.95)
     weight_decay: float = 0.1
@@ -55,13 +63,7 @@ class ModelConfig:
     mtp_loss_weight: float = 0.25
     device: str = "cuda"
     dtype: str = "float16"
-    # ==================== GENERATION VARIABLES ====================
 
-    # Text generation settings
-    max_generated_tokens: int = 1024
-    samples: int = 16
-    temperature: float = 0.8
-    top_k: int = 64
 
    
     # ============OTHERS========
