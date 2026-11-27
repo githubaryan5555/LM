@@ -10,7 +10,7 @@ class ModelConfig:
     # Core architecture
     vocab_size: int = 8192
     block_size: int = 256
-    n_layer: int = 1
+    n_layer: int = 6
     n_embd: int = 512
     n_head: int = 8
 
