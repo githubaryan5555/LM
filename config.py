@@ -32,7 +32,7 @@ class ModelConfig:
     # ==================== TRAIN VARIABLES ====================
 
     # Training schedule
-    compile: bool = False
+    compile: bool = True
     learning_rate: float = 8e-4
     max_iters: int = 5000
     warmup_steps: int = 500
