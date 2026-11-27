@@ -2,9 +2,7 @@
 import math
 import numpy as np
 import torch
-import torch_xla
-import torch_xla.core.xla_model as xm
-import torch_xla.runtime as xr
+import torch_tpu
 from tqdm.auto import tqdm
 from model import Model
 from config import ModelConfig
@@ -15,28 +13,37 @@ def train_model():
     config.model_save_folder.mkdir(parents=True, exist_ok=True)
 
     # TPU device
-    device = xm.xla_device()
+    device = torch.device("tpu")
 
-    # TPU precision
+    # Precision
     dtype = {
         "float16": torch.float16,
         "bfloat16": torch.bfloat16,
         "float32": torch.float32
     }[config.dtype]
 
-    # BF16 is recommended for TPU
+    # BF16 recommended for TPU
     amp = dtype != torch.float32
 
     def autocast():
         return torch.autocast(
-            device_type="xla",
+            device_type="tpu",
             dtype=dtype,
             enabled=amp
         )
 
     # Pre-tokenized uint16 datasets
-    train_data = np.memmap(config.train_path, dtype=np.uint16, mode="r")
-    val_data = np.memmap(config.val_path, dtype=np.uint16, mode="r")
+    train_data = np.memmap(
+        config.train_path,
+        dtype=np.uint16,
+        mode="r"
+    )
+
+    val_data = np.memmap(
+        config.val_path,
+        dtype=np.uint16,
+        mode="r"
+    )
 
     def get_batch(split):
         data = train_data if split == "train" else val_data
@@ -59,7 +66,7 @@ def train_model():
             torch.from_numpy(y).to(device)
         )
 
-    # Model and compilation
+    # Model
     torch.manual_seed(42)
 
     model = Model(config).to(device)
@@ -77,19 +84,32 @@ def train_model():
         eps=config.eps
     )
 
-    raw_model = model._orig_mod if hasattr(model, "_orig_mod") else model
-    params = sum(p.numel() for p in raw_model.parameters())
+    raw_model = (
+        model._orig_mod
+        if hasattr(model, "_orig_mod")
+        else model
+    )
+
+    params = sum(
+        p.numel() for p in raw_model.parameters()
+    )
 
     print(f"Parameters: {params:,}")
     print(f"Device: {device} | dtype: {config.dtype} | compile: {getattr(config, 'compile', False)}")
     print(f"Batch: {config.batch_size} | Accumulation: {config.gradient_accumulation_steps}")
-    print(f"Tokens/step: {config.batch_size * config.gradient_accumulation_steps * config.block_size:,}")
-    print(f"Evaluation: every {config.eval_interval} steps, {config.eval_iters} batches per split")
-    print(f"TPU: {xr.global_runtime_device_count()} devices")
+    print(
+        f"Tokens/step: "
+        f"{config.batch_size * config.gradient_accumulation_steps * config.block_size:,}"
+    )
+    print(
+        f"Evaluation: every {config.eval_interval} steps, "
+        f"{config.eval_iters} batches per split"
+    )
 
     @torch.inference_mode()
     def estimate_loss():
         model.eval()
+
         losses = {}
 
         for split in ("train", "val"):
@@ -106,6 +126,7 @@ def train_model():
             losses[split] = total / config.eval_iters
 
         model.train()
+
         return losses
 
     best_val_loss = float("inf")
@@ -115,30 +136,48 @@ def train_model():
 
     for step in tqdm(range(1, config.max_iters + 1)):
 
+        # Learning rate schedule
         if step <= config.warmup_steps:
-            lr = config.learning_rate * step / config.warmup_steps
+            lr = (
+                config.learning_rate
+                * step
+                / config.warmup_steps
+            )
+
         else:
             progress = (
-                (step - config.warmup_steps) /
-                max(1, config.max_iters - config.warmup_steps)
+                (step - config.warmup_steps)
+                / max(
+                    1,
+                    config.max_iters - config.warmup_steps
+                )
             )
 
             lr = config.min_lr + (
                 config.learning_rate - config.min_lr
-            ) * (1 + math.cos(math.pi * progress)) / 2
+            ) * (
+                1 + math.cos(math.pi * progress)
+            ) / 2
 
         for group in optimizer.param_groups:
             group["lr"] = lr
 
-        total_loss = main_loss = mtp_loss = 0.0
+        total_loss = 0.0
+        main_loss = 0.0
+        mtp_loss = 0.0
 
+        # Gradient accumulation
         for _ in range(config.gradient_accumulation_steps):
 
             X, Y = get_batch("train")
 
             with autocast():
                 _, loss, main, mtp = model(X, Y)
-                loss = loss / config.gradient_accumulation_steps
+
+                loss = (
+                    loss /
+                    config.gradient_accumulation_steps
+                )
 
             loss.backward()
 
@@ -148,29 +187,32 @@ def train_model():
             if mtp is not None:
                 mtp_loss += mtp.detach().item()
 
-        # TPU optimizer step
-        xm.optimizer_step(optimizer)
+        # Optimizer step
+        optimizer.step()
         optimizer.zero_grad(set_to_none=True)
 
         total_loss /= config.gradient_accumulation_steps
         main_loss /= config.gradient_accumulation_steps
         mtp_loss /= config.gradient_accumulation_steps
 
+        # Logging
         if step % 10 == 0:
-            xm.mark_step()
 
             log = (
-                f"Step {step} | Loss {total_loss:.4f} "
-                f"| Main {main_loss:.4f} "
-                f"| MTP {mtp_loss:.4f} "
-                f"| LR {lr:.2e}"
+                f"Step {step} | "
+                f"Loss {total_loss:.4f} | "
+                f"Main {main_loss:.4f} | "
+                f"MTP {mtp_loss:.4f} | "
+                f"LR {lr:.2e}"
             )
 
             tqdm.write(log)
 
-        if step % config.eval_interval == 0 or step == config.max_iters:
-
-            xm.mark_step()
+        # Evaluation
+        if (
+            step % config.eval_interval == 0
+            or step == config.max_iters
+        ):
 
             losses = estimate_loss()
 
@@ -184,25 +226,25 @@ def train_model():
 
                 best_val_loss = losses["val"]
 
-                xm.mark_step()
-
-                # Save model checkpoint from TPU to CPU
+                # Save best model
                 cpu_state_dict = {
                     k: v.detach().cpu()
                     for k, v in raw_model.state_dict().items()
                 }
 
-                xm.save(
+                torch.save(
                     cpu_state_dict,
                     config.model_save_folder / "best_model.pt"
                 )
 
                 print(
-                    f"Saved best model | Val loss: {best_val_loss:.4f}"
+                    f"Saved best model | "
+                    f"Val loss: {best_val_loss:.4f}"
                 )
 
     print(
-        f"Training complete | Best validation loss: {best_val_loss:.4f}"
+        f"Training complete | "
+        f"Best validation loss: {best_val_loss:.4f}"
     )
 
     return model, config
