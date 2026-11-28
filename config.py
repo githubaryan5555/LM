@@ -32,13 +32,13 @@ class ModelConfig:
     # ==================== TRAIN VARIABLES ====================
 
     # Training schedule
-    print_every: int = 8
+    print_every: int = 10
     compile: bool = True
     learning_rate: float = 8e-4
     max_iters: int = 5000
-    warmup_steps: int = 500
+    warmup_steps: int = 100
     min_lr: float = 2e-4
-    eval_interval: int = 64
+    eval_interval: int = 100
     eval_iters: int = 256
     
     batch_size: int = 128
